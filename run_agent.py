@@ -1104,8 +1104,8 @@ class AIAgent:
                 if self._memory_enabled or self._user_profile_enabled:
                     from tools.memory_tool import MemoryStore
                     self._memory_store = MemoryStore(
-                        memory_char_limit=mem_config.get("memory_char_limit", 2200),
-                        user_char_limit=mem_config.get("user_char_limit", 1375),
+                        memory_char_limit=mem_config.get("memory_char_limit", 3000),
+                        user_char_limit=mem_config.get("user_char_limit", 1800),
                     )
                     self._memory_store.load_from_disk()
             except Exception:
@@ -6546,13 +6546,18 @@ class AIAgent:
                         args = json.loads(tc.function.arguments)
                         flush_target = args.get("target", "memory")
                         from tools.memory_tool import memory_tool as _memory_tool
-                        _memory_tool(
+                        _flush_result = _memory_tool(
                             action=args.get("action"),
                             target=flush_target,
                             content=args.get("content"),
                             old_text=args.get("old_text"),
                             store=self._memory_store,
                         )
+                        try:
+                            if json.loads(_flush_result).get("success"):
+                                self._invalidate_system_prompt()
+                        except Exception:
+                            pass
                         if not self.quiet_mode:
                             print(f"  🧠 Memory flush: saved to {args.get('target', 'memory')}")
                     except Exception as e:
@@ -7117,6 +7122,11 @@ class AIAgent:
                     old_text=function_args.get("old_text"),
                     store=self._memory_store,
                 )
+                try:
+                    if json.loads(function_result).get("success"):
+                        self._invalidate_system_prompt()
+                except Exception:
+                    pass
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
