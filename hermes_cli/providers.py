@@ -217,7 +217,7 @@ ALIASES: Dict[str, str] = {
     "lmstudio": "lmstudio",
     "lm-studio": "lmstudio",
     "lm_studio": "lmstudio",
-    "ollama": "ollama-cloud",
+    "ollama": "custom",  # Was "ollama-cloud" — dangling string with no downstream handler. Aligned with auth.py:825 and auxiliary_client.py:_PROVIDER_ALIASES. Fixed 2026-04-08.
     "vllm": "local",
     "llamacpp": "local",
     "llama.cpp": "local",

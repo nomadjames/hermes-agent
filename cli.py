@@ -1546,17 +1546,8 @@ class HermesCLI:
         # authoritative.  This avoids conflicts in multi-agent setups where
         # env vars would stomp each other.
         _model_config = CLI_CONFIG.get("model", {})
-        _config_model = (_model_config.get("default") or _model_config.get("model") or "") if isinstance(_model_config, dict) else (_model_config or "")
-        _DEFAULT_CONFIG_MODEL = ""
-        self.model = model or _config_model or _DEFAULT_CONFIG_MODEL
-        # Auto-detect model from local server if still on default
-        if self.model == _DEFAULT_CONFIG_MODEL:
-            _base_url = (_model_config.get("base_url") or "") if isinstance(_model_config, dict) else ""
-            if "localhost" in _base_url or "127.0.0.1" in _base_url:
-                from hermes_cli.runtime_provider import _auto_detect_local_model
-                _detected = _auto_detect_local_model(_base_url)
-                if _detected:
-                    self.model = _detected
+        _DEFAULT_CONFIG_MODEL = get_locked_main_model()
+        self.model = model or _DEFAULT_CONFIG_MODEL
         # Track whether model was explicitly chosen by the user or fell back
         # to the global default.  Provider-specific normalisation may override
         # the default silently but should warn when overriding an explicit choice.
@@ -1570,13 +1561,9 @@ class HermesCLI:
         self._explicit_api_key = api_key
         self._explicit_base_url = base_url
 
-        # Provider selection is resolved lazily at use-time via _ensure_runtime_credentials().
-        self.requested_provider = (
-            provider
-            or CLI_CONFIG["model"].get("provider")
-            or os.getenv("HERMES_INFERENCE_PROVIDER")
-            or "auto"
-        )
+        # Main Hermes runtime is hard-pinned. Supporting contexts may still pass
+        # an explicit provider, but the default shell identity does not drift.
+        self.requested_provider = provider or get_locked_main_provider()
         self._provider_source: Optional[str] = None
         self.provider = self.requested_provider
         self.api_mode = "chat_completions"
@@ -4189,8 +4176,20 @@ class HermesCLI:
         # Parse --provider and --global flags
         model_input, explicit_provider, persist_global = parse_model_flags(raw_args)
 
-        user_provs = None
-        custom_provs = None
+        _pinned_model = "gpt-5.4"
+        _pinned_provider = "openai-codex"
+        _pinned_msg = (
+            f"  Hermes is hard-pinned to {_pinned_model} via {_pinned_provider}. "
+            "Model switching is disabled."
+        )
+        if not model_input and not explicit_provider:
+            _cprint(_pinned_msg)
+            return
+        _cprint(_pinned_msg)
+        return
+
+        # Read user providers from config.yaml for custom endpoint resolution
+
         try:
             from hermes_cli.config import load_config
             cfg = load_config()

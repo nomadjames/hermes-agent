@@ -670,7 +670,7 @@ class TestRunJobSessionPersistence:
         assert call_args[0][1] == "cron_complete"
         fake_db.close.assert_called_once()
 
-    def test_run_job_empty_response_returns_empty_not_placeholder(self, tmp_path):
+    def test_run_job_empty_response_fails_validation(self, tmp_path):
         """Empty final_response should stay empty for delivery logic (issue #2234).
         
         The placeholder '(No response generated)' should only appear in the
@@ -704,12 +704,11 @@ class TestRunJobSessionPersistence:
 
             success, output, final_response, error = run_job(job)
 
-        assert success is True
-        assert error is None
-        # final_response should be empty for delivery logic to skip
+        assert success is False
+        assert error == "No response generated"
         assert final_response == ""
-        # But the output log should show the placeholder
         assert "(No response generated)" in output
+        assert "## Error" in output
 
     def test_run_job_sets_auto_delivery_env_from_dotenv_home_channel(self, tmp_path, monkeypatch):
         job = {
@@ -987,12 +986,14 @@ class TestSilentDelivery:
             tick(verbose=False)
         deliver_mock.assert_called_once()
 
-    def test_silent_response_suppresses_delivery(self, caplog):
+    def test_silent_response_suppresses_delivery(self, caplog, tmp_path):
         with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
              patch("cron.scheduler.run_job", return_value=(True, "# output", "[SILENT]", None)), \
              patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
              patch("cron.scheduler._deliver_result") as deliver_mock, \
-             patch("cron.scheduler.mark_job_run"):
+             patch("cron.scheduler.mark_job_run"), \
+             patch("cron.scheduler._LOCK_FILE", tmp_path / "tick.lock"), \
+             patch("cron.scheduler._LOCK_DIR", tmp_path):
             from cron.scheduler import tick
             with caplog.at_level(logging.INFO, logger="cron.scheduler"):
                 tick(verbose=False)
@@ -1042,12 +1043,14 @@ class TestSilentDelivery:
             tick(verbose=False)
         deliver_mock.assert_called_once()
 
-    def test_output_saved_even_when_delivery_suppressed(self):
+    def test_output_saved_even_when_delivery_suppressed(self, tmp_path):
         with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
              patch("cron.scheduler.run_job", return_value=(True, "# full output", "[SILENT]", None)), \
              patch("cron.scheduler.save_job_output") as save_mock, \
              patch("cron.scheduler._deliver_result") as deliver_mock, \
-             patch("cron.scheduler.mark_job_run"):
+             patch("cron.scheduler.mark_job_run"), \
+             patch("cron.scheduler._LOCK_FILE", tmp_path / "tick.lock"), \
+             patch("cron.scheduler._LOCK_DIR", tmp_path):
             save_mock.return_value = "/tmp/out.md"
             from cron.scheduler import tick
             tick(verbose=False)
@@ -1124,6 +1127,34 @@ class TestBuildJobPromptMissingSkill:
             result = _build_job_prompt({"skills": ["ghost-skill", "real-skill"], "prompt": "go"})
         assert "Real skill content." in result
         assert "go" in result
+
+
+class TestTickDeliveryFailureHandling:
+    def test_tick_delivery_error_does_not_mark_job_ok(self, tmp_path):
+        job = {
+            "id": "deliver-fail",
+            "name": "deliver fail",
+            "enabled": True,
+            "deliver": "discord:123",
+        }
+
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.advance_next_run"), \
+             patch("cron.scheduler.run_job", return_value=(True, "output", "hello", None)), \
+             patch("cron.scheduler.save_job_output"), \
+             patch("cron.scheduler._deliver_result", return_value="network timeout"), \
+             patch("cron.scheduler.mark_job_run") as mark_mock, \
+             patch("cron.scheduler._LOCK_FILE", tmp_path / "tick.lock"), \
+             patch("cron.scheduler._LOCK_DIR", tmp_path):
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        mark_mock.assert_called_once()
+        args, kwargs = mark_mock.call_args
+        assert args[0] == "deliver-fail"
+        assert args[1] is False
+        assert args[2] == "Delivery failed: network timeout"
+        assert kwargs["delivery_error"] == "network timeout"
 
 
 class TestTickAdvanceBeforeRun:

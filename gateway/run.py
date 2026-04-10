@@ -282,6 +282,11 @@ def _expand_whatsapp_auth_aliases(identifier: str) -> set:
 
 logger = logging.getLogger(__name__)
 
+from hermes_cli.routing_policy import (
+    get_locked_main_model,
+    get_locked_main_provider,
+)
+
 # Sentinel placed into _running_agents immediately when a session starts
 # processing, *before* any await.  Prevents a second message for the same
 # session from bypassing the "already running" guard during the async gap
@@ -298,7 +303,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
 
     try:
         runtime = resolve_runtime_provider(
-            requested=os.getenv("HERMES_INFERENCE_PROVIDER"),
+            requested=get_locked_main_provider(),
         )
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
@@ -418,19 +423,8 @@ def _load_gateway_config() -> dict:
 
 
 def _resolve_gateway_model(config: dict | None = None) -> str:
-    """Read model from config.yaml — single source of truth.
-
-    Without this, temporary AIAgent instances (memory flush, /compress) fall
-    back to the hardcoded default which fails when the active provider is
-    openai-codex.
-    """
-    cfg = config if config is not None else _load_gateway_config()
-    model_cfg = cfg.get("model", {})
-    if isinstance(model_cfg, str):
-        return model_cfg
-    elif isinstance(model_cfg, dict):
-        return model_cfg.get("default") or model_cfg.get("model") or ""
-    return ""
+    """Return the locked main model for gateway-created Hermes agents."""
+    return get_locked_main_model()
 
 
 def _resolve_hermes_bin() -> Optional[list[str]]:
@@ -3597,6 +3591,14 @@ class GatewayRunner:
 
         # Parse --provider and --global flags
         model_input, explicit_provider, persist_global = parse_model_flags(raw_args)
+
+        _pinned_model = "gpt-5.4"
+        _pinned_provider = "openai-codex"
+        _pinned_msg = (
+            f"Hermes is hard-pinned to `{_pinned_model}` via `{_pinned_provider}`. "
+            "Model switching is disabled."
+        )
+        return _pinned_msg
 
         # Read current model/provider from config
         current_model = ""

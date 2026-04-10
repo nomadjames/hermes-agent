@@ -802,9 +802,51 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
         final_response = result.get("final_response", "") or ""
         # Use a separate variable for log display; keep final_response clean
-        # for delivery logic (empty response = no delivery).
+        # for delivery logic.
         logged_response = final_response if final_response else "(No response generated)"
-        
+
+        result_completed = result.get("completed")
+        result_partial = bool(result.get("partial", False))
+        result_interrupted = bool(result.get("interrupted", False))
+        normalized_response = final_response.strip()
+        is_explicit_silent = normalized_response.upper() == SILENT_MARKER
+
+        result_error = None
+        if result_interrupted:
+            result_error = "Agent run interrupted"
+        elif result_partial:
+            result_error = "Agent returned partial result"
+        elif result_completed is False:
+            result_error = "Agent did not complete"
+        elif not normalized_response:
+            result_error = "No response generated"
+        elif normalized_response == "(empty)":
+            result_error = "Agent returned empty response"
+
+        if result_error and not is_explicit_silent:
+            output = f"""# Cron Job: {job_name} (FAILED)
+
+**Job ID:** {job_id}
+**Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
+**Schedule:** {job.get('schedule_display', 'N/A')}
+
+## Prompt
+
+{prompt}
+
+## Response
+
+{logged_response}
+
+## Error
+
+```
+{result_error}
+```
+"""
+            logger.error("Job '%s' failed validation: %s", job_name, result_error)
+            return False, output, final_response, result_error
+
         output = f"""# Cron Job: {job_name}
 
 **Job ID:** {job_id}
@@ -819,7 +861,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
 {logged_response}
 """
-        
+
         logger.info("Job '%s' completed successfully", job_name)
         return True, output, final_response, None
         
@@ -939,6 +981,10 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     except Exception as de:
                         delivery_error = str(de)
                         logger.error("Delivery failed for job %s: %s", job["id"], de)
+
+                if success and delivery_error:
+                    success = False
+                    error = error or f"Delivery failed: {delivery_error}"
 
                 mark_job_run(job["id"], success, error, delivery_error=delivery_error)
                 executed += 1

@@ -59,6 +59,11 @@ from hermes_constants import OPENROUTER_BASE_URL
 
 logger = logging.getLogger(__name__)
 
+from hermes_cli.routing_policy import (
+    get_locked_main_model,
+    get_locked_main_provider,
+)
+
 _PROVIDER_ALIASES = {
     "google": "gemini",
     "google-gemini": "gemini",
@@ -73,6 +78,21 @@ _PROVIDER_ALIASES = {
     "minimax_cn": "minimax-cn",
     "claude": "anthropic",
     "claude-code": "anthropic",
+    # Local / OpenAI-compatible servers — route through the "custom" branch
+    # which reads base_url + api_key from config.yaml model.* via
+    # _resolve_custom_runtime(). Mirrors hermes_cli/auth.py:825.
+    # Without these, picking an Ollama model in `hermes model` writes
+    # provider: ollama to config.yaml, the main chat loop handles it via
+    # auth.py's alias, but every auxiliary caller (delegate_task,
+    # compression, vision, MCP, memory, skills_hub) falls through
+    # resolve_provider_client and 401s. Fixed 2026-04-08.
+    "ollama":    "custom",
+    "lmstudio":  "custom",
+    "lm-studio": "custom",
+    "vllm":      "custom",
+    "llamacpp":  "custom",
+    "llama.cpp": "custom",
+    "llama-cpp": "custom",
 }
 
 
@@ -818,11 +838,13 @@ def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
 
 
 def _read_main_model() -> str:
-    """Read the user's configured main model from config.yaml.
-
-    config.yaml model.default is the single source of truth for the active
-    model. Environment variables are no longer consulted.
-    """
+    """Read the locked main Hermes model."""
+    try:
+        locked = get_locked_main_model()
+        if locked:
+            return locked.strip()
+    except Exception:
+        pass
     try:
         from hermes_cli.config import load_config
         cfg = load_config()
@@ -839,11 +861,13 @@ def _read_main_model() -> str:
 
 
 def _read_main_provider() -> str:
-    """Read the user's configured main provider from config.yaml.
-
-    Returns the lowercase provider id (e.g. "alibaba", "openrouter") or ""
-    if not configured.
-    """
+    """Read the locked main Hermes provider."""
+    try:
+        locked = get_locked_main_provider()
+        if locked:
+            return locked.strip().lower()
+    except Exception:
+        pass
     try:
         from hermes_cli.config import load_config
         cfg = load_config()

@@ -45,6 +45,18 @@ from agent.models_dev import (
 
 logger = logging.getLogger(__name__)
 
+from hermes_cli.routing_policy import (
+    get_locked_main_model,
+    get_locked_main_provider,
+)
+
+# Hermes is hard-pinned. Main runtime model switches are not allowed.
+_HARD_PINNED_MODEL = get_locked_main_model()
+_HARD_PINNED_PROVIDER = get_locked_main_provider()
+_HARD_PIN_MESSAGE = (
+    f"Hermes is hard-pinned to {_HARD_PINNED_MODEL} via {_HARD_PINNED_PROVIDER}. "
+    "Runtime model switching is disabled."
+)
 
 # ---------------------------------------------------------------------------
 # Non-agentic model warning
@@ -435,6 +447,21 @@ def switch_model(
     resolved_alias = ""
     new_model = raw_input.strip()
     target_provider = current_provider
+
+    requested_model = new_model.lower()
+    requested_provider = explicit_provider.strip().lower()
+    if requested_model and requested_model != _HARD_PINNED_MODEL.lower():
+        return ModelSwitchResult(
+            success=False,
+            is_global=is_global,
+            error_message=_HARD_PIN_MESSAGE,
+        )
+    if requested_provider and requested_provider != _HARD_PINNED_PROVIDER.lower():
+        return ModelSwitchResult(
+            success=False,
+            is_global=is_global,
+            error_message=_HARD_PIN_MESSAGE,
+        )
 
     # =================================================================
     # PATH A: Explicit --provider given
