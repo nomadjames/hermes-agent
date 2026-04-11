@@ -72,6 +72,17 @@ _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 # User-managed env files should override stale shell exports on restart.
 from hermes_constants import get_hermes_home, display_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
+try:
+    from hermes_cli.routing_policy import (
+        get_locked_main_model,
+        get_locked_main_provider,
+    )
+except ImportError:
+    def get_locked_main_model() -> str:
+        return "gpt-5.4"
+
+    def get_locked_main_provider() -> str:
+        return "openai-codex"
 
 _hermes_home = get_hermes_home()
 _project_env = Path(__file__).parent / '.env'
@@ -1668,7 +1679,7 @@ class HermesCLI:
         # explicit choice — the user just never changed it.  But a config model
         # like "gpt-5.3-codex" IS explicit and must be preserved.
         self._model_is_default = not model and (
-            not _config_model or _config_model == _DEFAULT_CONFIG_MODEL
+            not _model_config or _model_config == _DEFAULT_CONFIG_MODEL
         )
 
         self._explicit_api_key = api_key
