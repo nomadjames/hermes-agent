@@ -10,6 +10,7 @@ Uses discord.py library for:
 """
 
 import asyncio
+import json
 import logging
 import os
 import struct
@@ -23,6 +24,7 @@ from typing import Callable, Dict, Optional, Any
 logger = logging.getLogger(__name__)
 
 VALID_THREAD_AUTO_ARCHIVE_MINUTES = {60, 1440, 4320, 10080}
+DISCORD_COMMAND_PAYLOAD_SAFE_LIMIT = 7900
 
 try:
     import discord
@@ -1740,18 +1742,172 @@ class DiscordAdapter(BasePlatformAdapter):
         async def slash_btw(interaction: discord.Interaction, question: str):
             await self._run_simple_slash(interaction, f"/btw {question}")
 
-        # Register skills under a single /skill command group with category
-        # subcommand groups.  This uses 1 top-level slot instead of N,
-        # supporting up to 25 categories × 25 skills = 625 skills.
+        # Register skills for Discord. Prefer the rich /skill group when the
+        # serialized payload fits Discord's limits, otherwise fall back to a
+        # single autocomplete-powered /skill command.
         self._register_skill_group(tree)
 
-    def _register_skill_group(self, tree) -> None:
-        """Register a ``/skill`` command group with category subcommand groups.
+    def _make_discord_skill_handler(self, cmd_key: str):
+        @discord.app_commands.describe(args="Optional arguments for the skill")
+        async def _handler(interaction: discord.Interaction, args: str = ""):
+            await self._run_simple_slash(interaction, f"{cmd_key} {args}".strip())
 
-        Skills are organized by their directory category under ``SKILLS_DIR``.
-        Each category becomes a subcommand group; root-level skills become
-        direct subcommands.  Discord supports 25 subcommand groups × 25
-        subcommands each = 625 skills — well beyond the old 100-command cap.
+        _handler.__name__ = f"skill_{cmd_key.lstrip('/').replace('-', '_')}"
+        return _handler
+
+    def _build_discord_skill_group(self, categories, uncategorized):
+        skill_group = discord.app_commands.Group(
+            name="skill",
+            description="Run a Hermes skill",
+        )
+
+        for discord_name, description, cmd_key in uncategorized:
+            cmd = discord.app_commands.Command(
+                name=discord_name,
+                description=description or f"Run the {discord_name} skill",
+                callback=self._make_discord_skill_handler(cmd_key),
+            )
+            skill_group.add_command(cmd)
+
+        for cat_name in sorted(categories):
+            cat_desc = f"{cat_name.replace('-', ' ').title()} skills"
+            if len(cat_desc) > 100:
+                cat_desc = cat_desc[:97] + "..."
+            cat_group = discord.app_commands.Group(
+                name=cat_name,
+                description=cat_desc,
+                parent=skill_group,
+            )
+            for discord_name, description, cmd_key in categories[cat_name]:
+                cmd = discord.app_commands.Command(
+                    name=discord_name,
+                    description=description or f"Run the {discord_name} skill",
+                    callback=self._make_discord_skill_handler(cmd_key),
+                )
+                cat_group.add_command(cmd)
+
+        return skill_group
+
+    def _estimate_discord_command_payload(self, tree, command) -> Optional[int]:
+        try:
+            return len(json.dumps(command.to_dict(tree), separators=(",", ":")))
+        except Exception:
+            return None
+
+    def _build_discord_skill_catalog(self) -> list[dict[str, str]]:
+        catalog: list[dict[str, str]] = []
+        seen_values: set[str] = set()
+
+        try:
+            from agent.skill_commands import get_skill_commands
+            from agent.skill_utils import get_disabled_skill_names
+            from tools.skills_tool import SKILLS_DIR
+
+            platform_disabled = get_disabled_skill_names(platform="discord")
+            skill_commands = get_skill_commands()
+            skills_dir = SKILLS_DIR.resolve()
+            hub_dir = (SKILLS_DIR / ".hub").resolve()
+
+            for cmd_key in sorted(skill_commands):
+                info = skill_commands[cmd_key]
+                skill_path = info.get("skill_md_path", "")
+                if not skill_path:
+                    continue
+
+                skill_md = _Path(skill_path).resolve()
+                if not str(skill_md).startswith(str(skills_dir)):
+                    continue
+                if str(skill_md).startswith(str(hub_dir)):
+                    continue
+
+                skill_name = info.get("name", "")
+                if skill_name in platform_disabled:
+                    continue
+
+                value = cmd_key.lstrip("/")
+                if not value or value in seen_values:
+                    continue
+
+                try:
+                    rel = skill_md.parent.relative_to(skills_dir)
+                    parts = rel.parts
+                except ValueError:
+                    parts = ()
+
+                if len(parts) >= 2:
+                    label = f"{parts[0]} / {value}"
+                else:
+                    label = value
+
+                if len(label) > 100:
+                    label = label[:97] + "..."
+
+                catalog.append({"name": label, "value": value})
+                seen_values.add(value)
+        except Exception:
+            return []
+
+        return catalog
+
+    def _register_skill_fallback_command(self, tree) -> int:
+        try:
+            from agent.skill_commands import resolve_skill_command_key
+        except Exception:
+            return 0
+
+        catalog = self._build_discord_skill_catalog()
+        if not catalog:
+            return 0
+
+        async def _autocomplete_skill_name(
+            interaction: discord.Interaction,
+            current: str,
+        ) -> list[discord.app_commands.Choice[str]]:
+            query = (current or "").strip().lower()
+            prefix_matches: list[dict[str, str]] = []
+            contains_matches: list[dict[str, str]] = []
+
+            for entry in catalog:
+                value = entry["value"].lower()
+                label = entry["name"].lower()
+                if not query or value.startswith(query) or label.startswith(query):
+                    prefix_matches.append(entry)
+                elif query in value or query in label:
+                    contains_matches.append(entry)
+
+            choices: list[discord.app_commands.Choice[str]] = []
+            seen: set[str] = set()
+            for entry in prefix_matches + contains_matches:
+                value = entry["value"]
+                if value in seen:
+                    continue
+                seen.add(value)
+                choices.append(discord.app_commands.Choice(name=entry["name"], value=value))
+                if len(choices) >= 25:
+                    break
+            return choices
+
+        @tree.command(name="skill", description="Run an installed skill")
+        @discord.app_commands.describe(skill="Installed skill name", args="Optional arguments for the skill")
+        @discord.app_commands.autocomplete(skill=_autocomplete_skill_name)
+        async def slash_skill(interaction: discord.Interaction, skill: str, args: str = ""):
+            resolved = resolve_skill_command_key(skill.strip().lstrip("/"))
+            if not resolved:
+                await interaction.response.send_message(
+                    f"Unknown skill: {skill}. Start typing to search installed skills.",
+                    ephemeral=True,
+                )
+                return
+            await self._run_simple_slash(interaction, f"{resolved} {args}".strip())
+
+        return len(catalog)
+
+    def _register_skill_group(self, tree) -> None:
+        """Register Discord skill commands with a size-aware fallback.
+
+        Prefer the grouped ``/skill`` tree when it fits comfortably under
+        Discord's payload limit. If the serialized command tree is too large,
+        fall back to a single autocomplete-powered ``/skill`` command.
         """
         try:
             from hermes_cli.commands import discord_skill_commands_by_category
@@ -1769,45 +1925,19 @@ class DiscordAdapter(BasePlatformAdapter):
             if not categories and not uncategorized:
                 return
 
-            skill_group = discord.app_commands.Group(
-                name="skill",
-                description="Run a Hermes skill",
-            )
-
-            # ── Helper: build a callback for a skill command key ──
-            def _make_handler(_key: str):
-                @discord.app_commands.describe(args="Optional arguments for the skill")
-                async def _handler(interaction: discord.Interaction, args: str = ""):
-                    await self._run_simple_slash(interaction, f"{_key} {args}".strip())
-                _handler.__name__ = f"skill_{_key.lstrip('/').replace('-', '_')}"
-                return _handler
-
-            # ── Uncategorized (root-level) skills → direct subcommands ──
-            for discord_name, description, cmd_key in uncategorized:
-                cmd = discord.app_commands.Command(
-                    name=discord_name,
-                    description=description or f"Run the {discord_name} skill",
-                    callback=_make_handler(cmd_key),
+            skill_group = self._build_discord_skill_group(categories, uncategorized)
+            payload_size = self._estimate_discord_command_payload(tree, skill_group)
+            if payload_size is not None and payload_size > DISCORD_COMMAND_PAYLOAD_SAFE_LIMIT:
+                total = self._register_skill_fallback_command(tree)
+                logger.warning(
+                    "[%s] /skill group payload %d exceeds Discord safe limit %d, "
+                    "registered single autocomplete /skill command for %d skill(s) instead",
+                    self.name,
+                    payload_size,
+                    DISCORD_COMMAND_PAYLOAD_SAFE_LIMIT,
+                    total,
                 )
-                skill_group.add_command(cmd)
-
-            # ── Category subcommand groups ──
-            for cat_name in sorted(categories):
-                cat_desc = f"{cat_name.replace('-', ' ').title()} skills"
-                if len(cat_desc) > 100:
-                    cat_desc = cat_desc[:97] + "..."
-                cat_group = discord.app_commands.Group(
-                    name=cat_name,
-                    description=cat_desc,
-                    parent=skill_group,
-                )
-                for discord_name, description, cmd_key in categories[cat_name]:
-                    cmd = discord.app_commands.Command(
-                        name=discord_name,
-                        description=description or f"Run the {discord_name} skill",
-                        callback=_make_handler(cmd_key),
-                    )
-                    cat_group.add_command(cmd)
+                return
 
             tree.add_command(skill_group)
 

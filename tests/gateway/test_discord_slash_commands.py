@@ -44,6 +44,7 @@ def _ensure_discord_mock():
     discord_mod.app_commands = SimpleNamespace(
         describe=lambda **kwargs: (lambda fn: fn),
         choices=lambda **kwargs: (lambda fn: fn),
+        autocomplete=lambda **kwargs: (lambda fn: fn),
         Choice=lambda **kwargs: SimpleNamespace(**kwargs),
         Group=_FakeGroup,
         Command=_FakeCommand,
@@ -620,4 +621,76 @@ def test_register_skill_group_handler_dispatches_command(adapter):
     assert gif_cmd.callback is not None
     # The callback name should reflect the skill
     assert "gif_search" in gif_cmd.callback.__name__
+
+
+@pytest.mark.asyncio
+async def test_register_skill_group_falls_back_to_single_skill_command(adapter):
+    """Oversized /skill payloads should fall back to a single autocomplete command."""
+    mock_categories = {
+        "creative": [
+            ("gif-search", "Search for GIFs", "/gif-search"),
+        ],
+    }
+
+    adapter._run_simple_slash = AsyncMock()
+
+    with (
+        patch(
+            "hermes_cli.commands.discord_skill_commands_by_category",
+            return_value=(mock_categories, [], 0),
+        ),
+        patch.object(adapter, "_estimate_discord_command_payload", return_value=99999),
+        patch.object(
+            adapter,
+            "_build_discord_skill_catalog",
+            return_value=[{"name": "creative / gif-search", "value": "gif-search"}],
+        ),
+        patch("agent.skill_commands.resolve_skill_command_key", return_value="/gif-search"),
+    ):
+        adapter._register_slash_commands()
+
+    skill_cmd = adapter._client.tree.commands["skill"]
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    await skill_cmd(interaction, skill="gif-search", args="cats")
+    adapter._run_simple_slash.assert_awaited_once_with(interaction, "/gif-search cats")
+    interaction.response.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_single_skill_fallback_rejects_unknown_skill(adapter):
+    """Fallback /skill command should show a clear error for unknown skills."""
+    mock_categories = {
+        "creative": [
+            ("gif-search", "Search for GIFs", "/gif-search"),
+        ],
+    }
+
+    adapter._run_simple_slash = AsyncMock()
+
+    with (
+        patch(
+            "hermes_cli.commands.discord_skill_commands_by_category",
+            return_value=(mock_categories, [], 0),
+        ),
+        patch.object(adapter, "_estimate_discord_command_payload", return_value=99999),
+        patch.object(
+            adapter,
+            "_build_discord_skill_catalog",
+            return_value=[{"name": "creative / gif-search", "value": "gif-search"}],
+        ),
+        patch("agent.skill_commands.resolve_skill_command_key", return_value=None),
+    ):
+        adapter._register_slash_commands()
+
+    skill_cmd = adapter._client.tree.commands["skill"]
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    await skill_cmd(interaction, skill="missing-skill", args="")
+    adapter._run_simple_slash.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
 
