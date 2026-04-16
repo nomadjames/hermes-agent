@@ -29,8 +29,10 @@ import os
 import socket as _socket
 import re
 import sqlite3
+import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
@@ -57,6 +59,12 @@ MAX_REQUEST_BYTES = 1_000_000  # 1 MB default limit for POST bodies
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
+DISCORD_MESSAGE_CHAR_LIMIT = 2000
+CLAUDE_CLARENCE_CHANNEL_NAME = "#claude-clarence"
+DISPATCH_MEMORY_OUTPUT_LIMIT = 5000
+DISPATCH_MEMORY_DESCRIPTION_LIMIT = 120
+DISPATCH_MEMORY_DIR = Path("/home/james/.openclaw/workspace/brain/dispatches")
+DISPATCH_MEMORY_DB = Path.home() / ".openclaw/workspace/memory/clarence.db"
 
 
 def _normalize_chat_content(
@@ -366,6 +374,65 @@ def _derive_chat_session_id(
     return f"api-{digest}"
 
 
+def _claude_exchange_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _json_for_claude_exchange_log(payload: Any) -> str:
+    try:
+        return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        return str(payload)
+
+
+def _split_claude_exchange_for_discord(*, timestamp: str, run_id: str, direction: str, raw_body: str) -> List[str]:
+    header_lines = [
+        f"timestamp: {timestamp}",
+        f"run_id: {run_id}",
+        f"direction: {direction}",
+    ]
+    body_text = raw_body or ""
+    base_header = "\n".join(header_lines)
+    body_prefix = "raw_body:\n"
+    single = f"{base_header}\n{body_prefix}{body_text}"
+    if len(single) <= DISCORD_MESSAGE_CHAR_LIMIT:
+        return [single]
+
+    chunks: List[str] = []
+    start = 0
+    while start < len(body_text):
+        part_number = len(chunks) + 1
+        provisional_header = f"{base_header}\npart: [{part_number}/?]\n{body_prefix}"
+        available = max(DISCORD_MESSAGE_CHAR_LIMIT - len(provisional_header), 1)
+        end = min(start + available, len(body_text))
+        chunks.append(body_text[start:end])
+        start = end
+
+    messages: List[str] = []
+    total = len(chunks)
+    for index, chunk in enumerate(chunks, start=1):
+        header = f"{base_header}\npart: [{index}/{total}]\n{body_prefix}"
+        messages.append(f"{header}{chunk}")
+    return messages
+
+
+def _load_dotenv_value(key: str) -> str:
+    env_path = os.path.expanduser("~/.hermes/.env")
+    try:
+        with open(env_path, encoding="utf-8") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                name, value = stripped.split("=", 1)
+                if name.strip() != key:
+                    continue
+                return value.strip().strip('"').strip("'")
+    except Exception:
+        return ""
+    return ""
+
+
 class APIServerAdapter(BasePlatformAdapter):
     """
     OpenAI-compatible HTTP API server adapter.
@@ -395,6 +462,256 @@ class APIServerAdapter(BasePlatformAdapter):
         # Creation timestamps for orphaned-run TTL sweep
         self._run_streams_created: Dict[str, float] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+
+    def _discord_claude_log_target(self) -> tuple[Optional[str], Optional[str]]:
+        try:
+            from gateway.channel_directory import resolve_channel_name
+
+            channel_id = resolve_channel_name("discord", CLAUDE_CLARENCE_CHANNEL_NAME)
+            token = os.getenv("DISCORD_BOT_TOKEN") or _load_dotenv_value("DISCORD_BOT_TOKEN")
+            if not token:
+                try:
+                    from gateway.config import Platform, load_gateway_config
+                    config = load_gateway_config()
+                    discord_cfg = config.platforms.get(Platform.DISCORD)
+                    if discord_cfg is not None:
+                        token = discord_cfg.token or ""
+                except Exception as exc:
+                    logger.debug("Claude exchange log config fallback unavailable: %s", exc)
+            if not token or not channel_id:
+                return None, None
+            return token, channel_id
+        except Exception as exc:
+            logger.debug("Claude exchange log target unavailable: %s", exc)
+            return None, None
+
+    async def _post_claude_exchange_to_discord(self, *, run_id: str, direction: str, payload: Any) -> List[str]:
+        token, channel_id = self._discord_claude_log_target()
+        if not token or not channel_id:
+            logger.warning("Claude exchange log skipped: Discord target %s unavailable", CLAUDE_CLARENCE_CHANNEL_NAME)
+            return []
+
+        from tools.send_message_tool import _send_discord
+
+        message_ids: List[str] = []
+        for chunk in _split_claude_exchange_for_discord(
+            timestamp=_claude_exchange_timestamp(),
+            run_id=run_id,
+            direction=direction,
+            raw_body=_json_for_claude_exchange_log(payload),
+        ):
+            result = await _send_discord(token, channel_id, chunk)
+            if not isinstance(result, dict) or not result.get("success"):
+                logger.warning(
+                    "Claude exchange Discord post failed for %s %s: %s",
+                    run_id,
+                    direction,
+                    result.get("error") if isinstance(result, dict) else result,
+                )
+                continue
+            message_id = result.get("message_id")
+            if message_id:
+                message_ids.append(str(message_id))
+        return message_ids
+
+    def _schedule_claude_clarence_log(self, *, run_id: str, direction: str, payload: Any) -> None:
+        async def _runner():
+            try:
+                message_ids = await self._post_claude_exchange_to_discord(
+                    run_id=run_id,
+                    direction=direction,
+                    payload=payload,
+                )
+                if message_ids:
+                    logger.info(
+                        "Claude exchange log posted direction=%s run_id=%s message_ids=%s",
+                        direction,
+                        run_id,
+                        ",".join(message_ids),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Claude exchange log failure direction=%s run_id=%s error=%s",
+                    direction,
+                    run_id,
+                    exc,
+                )
+
+        try:
+            task = asyncio.create_task(_runner())
+        except Exception as exc:
+            logger.warning(
+                "Claude exchange log scheduling failure direction=%s run_id=%s error=%s",
+                direction,
+                run_id,
+                exc,
+            )
+            return
+        try:
+            self._background_tasks.add(task)
+        except TypeError:
+            pass
+        if hasattr(task, "add_done_callback"):
+            task.add_done_callback(self._background_tasks.discard)
+
+    @staticmethod
+    def _dispatch_memory_source(*markers: Any) -> str:
+        for marker in markers:
+            if "claude-ops" in str(marker or ""):
+                return "claude.ai"
+        return "unknown"
+
+    @staticmethod
+    def _dispatch_memory_should_skip(*, task_text: str) -> bool:
+        return str(task_text or "").lstrip().startswith("Write one memory entry")
+
+    @staticmethod
+    def _truncate_dispatch_description(task_text: str) -> str:
+        flat = " ".join((task_text or "").split())
+        return flat[:DISPATCH_MEMORY_DESCRIPTION_LIMIT]
+
+    @staticmethod
+    def _dispatch_memory_name(*, source: str, run_id: str, day: str) -> str:
+        return f"dispatch-{source}-{run_id[-8:]}-{day}"
+
+    @staticmethod
+    def _dispatch_output_spill_path(*, run_id: str) -> Path:
+        return DISPATCH_MEMORY_DIR / f"{run_id}.txt"
+
+    def _prepare_dispatch_output(self, *, run_id: str, output_text: str) -> tuple[str, Optional[str]]:
+        rendered_output = "" if output_text is None else str(output_text)
+        if len(rendered_output) <= DISPATCH_MEMORY_OUTPUT_LIMIT:
+            return rendered_output, None
+
+        spill_path = self._dispatch_output_spill_path(run_id=run_id)
+        try:
+            spill_path.parent.mkdir(parents=True, exist_ok=True)
+            spill_path.write_text(rendered_output, encoding="utf-8")
+            spill_note = str(spill_path)
+        except Exception as exc:
+            print(f"Dispatch output spillover write failed run_id={run_id} path={spill_path} error={exc}", file=sys.stderr)
+            spill_note = None
+
+        truncated = rendered_output[:DISPATCH_MEMORY_OUTPUT_LIMIT]
+        suffix = "\n\n[output truncated]"
+        if spill_note:
+            suffix += f"\nFull output: {spill_note}"
+        return f"{truncated}{suffix}", spill_note
+
+    def _write_dispatch_memory(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        task_text: str,
+        output_text: str,
+        usage: Optional[Dict[str, Any]],
+        source: str,
+        started_at: float,
+        completed_at: float,
+    ) -> None:
+        source = self._dispatch_memory_source(source, run_id)
+        day = time.strftime("%Y-%m-%d", time.localtime(completed_at))
+        rendered_task = "" if task_text is None else str(task_text)
+        rendered_output, _spill_path = self._prepare_dispatch_output(
+            run_id=run_id,
+            output_text=output_text,
+        )
+        memory_name = self._dispatch_memory_name(source=source, run_id=run_id, day=day)
+        description = self._truncate_dispatch_description(rendered_task)
+        duration_seconds = max(completed_at - started_at, 0.0)
+        usage_text = json.dumps(usage or {}, ensure_ascii=False, sort_keys=True)
+        body = (
+            f"Task: {rendered_task}\n"
+            f"Status: {status}\n"
+            f"Source: {source}\n"
+            f"Duration: {duration_seconds:.3f}s\n"
+            f"Usage: {usage_text}\n"
+            "Output:\n"
+            f"{rendered_output}"
+        )
+        tags = json.dumps(["dispatch", source, status, day], ensure_ascii=False)
+        now = int(time.time())
+
+        conn = sqlite3.connect(str(DISPATCH_MEMORY_DB))
+        try:
+            conn.execute(
+                """
+                INSERT INTO memories (
+                    name, type, description, body, tags, created_at, updated_at, status, author_agent
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    type = excluded.type,
+                    description = excluded.description,
+                    body = excluded.body,
+                    tags = excluded.tags,
+                    updated_at = excluded.updated_at,
+                    status = excluded.status,
+                    author_agent = excluded.author_agent
+                """,
+                (
+                    memory_name,
+                    "reference",
+                    description,
+                    body,
+                    tags,
+                    now,
+                    now,
+                    "hermes",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _schedule_dispatch_memory_write(
+        self,
+        run_id: str,
+        status: str,
+        task_text: str,
+        output_text: str,
+        usage: Optional[Dict[str, Any]],
+        source: str,
+        started_at: float,
+        completed_at: float,
+    ) -> None:
+        """Fire-and-forget memory write on dispatch completion."""
+        if self._dispatch_memory_should_skip(task_text=task_text):
+            return
+
+        async def _runner() -> None:
+            try:
+                await asyncio.to_thread(
+                    self._write_dispatch_memory,
+                    run_id=run_id,
+                    status=status,
+                    task_text=task_text,
+                    output_text=output_text,
+                    usage=usage,
+                    source=source,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                )
+            except Exception as exc:
+                print(
+                    f"Dispatch memory write failed run_id={run_id} status={status} source={source} error={exc}",
+                    file=sys.stderr,
+                )
+
+        try:
+            task = asyncio.create_task(_runner())
+        except Exception as exc:
+            print(
+                f"Dispatch memory scheduling failure run_id={run_id} status={status} source={source} error={exc}",
+                file=sys.stderr,
+            )
+            return
+        try:
+            self._background_tasks.add(task)
+        except TypeError:
+            pass
+        if hasattr(task, "add_done_callback"):
+            task.add_done_callback(self._background_tasks.discard)
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -1405,6 +1722,18 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=400,
             )
 
+        claude_log_run_id = f"claude-ops-{uuid.uuid4().hex[:12]}"
+        dispatch_source = self._dispatch_memory_source(
+            body.get("source"),
+            body.get("metadata", {}).get("source"),
+            claude_log_run_id,
+        )
+        self._schedule_claude_clarence_log(
+            run_id=claude_log_run_id,
+            direction="claude->clarence",
+            payload=body,
+        )
+
         raw_input = body.get("input")
         if raw_input is None:
             return web.json_response(_openai_error("Missing 'input' field"), status=400)
@@ -1571,6 +1900,7 @@ class APIServerAdapter(BasePlatformAdapter):
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
+        dispatch_started_at = time.time()
         if idempotency_key:
             fp = _make_request_fingerprint(
                 body,
@@ -1579,6 +1909,17 @@ class APIServerAdapter(BasePlatformAdapter):
             try:
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_response)
             except Exception as e:
+                if not self._dispatch_memory_should_skip(task_text=user_message):
+                    self._schedule_dispatch_memory_write(
+                        run_id=claude_log_run_id,
+                        status="failed",
+                        task_text=user_message,
+                        output_text=str(e),
+                        usage=None,
+                        source=dispatch_source,
+                        started_at=dispatch_started_at,
+                        completed_at=time.time(),
+                    )
                 logger.error("Error running agent for responses: %s", e, exc_info=True)
                 return web.json_response(
                     _openai_error(f"Internal server error: {e}", err_type="server_error"),
@@ -1588,6 +1929,17 @@ class APIServerAdapter(BasePlatformAdapter):
             try:
                 result, usage = await _compute_response()
             except Exception as e:
+                if not self._dispatch_memory_should_skip(task_text=user_message):
+                    self._schedule_dispatch_memory_write(
+                        run_id=claude_log_run_id,
+                        status="failed",
+                        task_text=user_message,
+                        output_text=str(e),
+                        usage=None,
+                        source=dispatch_source,
+                        started_at=dispatch_started_at,
+                        completed_at=time.time(),
+                    )
                 logger.error("Error running agent for responses: %s", e, exc_info=True)
                 return web.json_response(
                     _openai_error(f"Internal server error: {e}", err_type="server_error"),
@@ -1641,6 +1993,24 @@ class APIServerAdapter(BasePlatformAdapter):
             # conversation name automatically chains to this response
             if conversation:
                 self._response_store.set_conversation(conversation, response_id)
+
+        if claude_log_run_id:
+            self._schedule_claude_clarence_log(
+                run_id=claude_log_run_id,
+                direction="clarence->claude",
+                payload=response_data,
+            )
+        if not self._dispatch_memory_should_skip(task_text=user_message):
+            self._schedule_dispatch_memory_write(
+                run_id=claude_log_run_id,
+                status="completed",
+                task_text=user_message,
+                output_text=final_response,
+                usage=usage,
+                source=dispatch_source,
+                started_at=dispatch_started_at,
+                completed_at=time.time(),
+            )
 
         return web.json_response(response_data)
 
@@ -2097,6 +2467,18 @@ class APIServerAdapter(BasePlatformAdapter):
         except Exception:
             return web.json_response(_openai_error("Invalid JSON"), status=400)
 
+        claude_log_run_id = f"run_{uuid.uuid4().hex}"
+        dispatch_source = self._dispatch_memory_source(
+            body.get("source"),
+            body.get("metadata", {}).get("source"),
+            claude_log_run_id,
+        )
+        self._schedule_claude_clarence_log(
+            run_id=claude_log_run_id,
+            direction="claude->clarence",
+            payload=body,
+        )
+
         raw_input = body.get("input")
         if not raw_input:
             return web.json_response(_openai_error("Missing 'input' field"), status=400)
@@ -2105,7 +2487,7 @@ class APIServerAdapter(BasePlatformAdapter):
         if not user_message:
             return web.json_response(_openai_error("No user message found in input"), status=400)
 
-        run_id = f"run_{uuid.uuid4().hex}"
+        run_id = claude_log_run_id or f"run_{uuid.uuid4().hex}"
         loop = asyncio.get_running_loop()
         q: "asyncio.Queue[Optional[Dict]]" = asyncio.Queue()
         self._run_streams[run_id] = q
@@ -2176,6 +2558,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
         session_id = body.get("session_id") or stored_session_id or run_id
         ephemeral_system_prompt = instructions
+        dispatch_started_at = time.time()
 
         async def _run_and_close():
             try:
@@ -2200,22 +2583,52 @@ class APIServerAdapter(BasePlatformAdapter):
 
                 result, usage = await asyncio.get_running_loop().run_in_executor(None, _run_sync)
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
-                q.put_nowait({
+                completion_event = {
                     "event": "run.completed",
                     "run_id": run_id,
                     "timestamp": time.time(),
                     "output": final_response,
                     "usage": usage,
-                })
+                }
+                q.put_nowait(completion_event)
+                if not self._dispatch_memory_should_skip(task_text=user_message):
+                    self._schedule_dispatch_memory_write(
+                        run_id=run_id,
+                        status="completed",
+                        task_text=user_message,
+                        output_text=final_response,
+                        usage=usage,
+                        source=dispatch_source,
+                        started_at=dispatch_started_at,
+                        completed_at=completion_event["timestamp"],
+                    )
+                if claude_log_run_id:
+                    self._schedule_claude_clarence_log(
+                        run_id=run_id,
+                        direction="clarence->claude",
+                        payload=completion_event,
+                    )
             except Exception as exc:
                 logger.exception("[api_server] run %s failed", run_id)
                 try:
+                    failed_at = time.time()
                     q.put_nowait({
                         "event": "run.failed",
                         "run_id": run_id,
-                        "timestamp": time.time(),
+                        "timestamp": failed_at,
                         "error": str(exc),
                     })
+                    if not self._dispatch_memory_should_skip(task_text=user_message):
+                        self._schedule_dispatch_memory_write(
+                            run_id=run_id,
+                            status="failed",
+                            task_text=user_message,
+                            output_text=str(exc),
+                            usage=None,
+                            source=dispatch_source,
+                            started_at=dispatch_started_at,
+                            completed_at=failed_at,
+                        )
                 except Exception:
                     pass
             finally:

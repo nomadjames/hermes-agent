@@ -12,12 +12,14 @@ Tests cover:
 - Error handling (invalid JSON, missing fields)
 """
 
+import asyncio
 import json
 import time
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import gateway.platforms.api_server as api_server_mod
 from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
 
@@ -2091,3 +2093,190 @@ class TestSessionIdHeader:
             call_kwargs = mock_run.call_args.kwargs
             assert call_kwargs["conversation_history"] == []
             assert call_kwargs["session_id"] == "some-session"
+
+
+
+class TestClaudeClarenceDiscordLogging:
+    def test_schedule_dispatch_memory_write_skips_only_manual_memory_entry_prefix(self, adapter):
+        assert adapter._dispatch_memory_should_skip(task_text="Write one memory entry about this") is True
+        assert adapter._dispatch_memory_should_skip(task_text="memory_write a note about this") is False
+
+    def test_dispatch_memory_source_detects_claude_ops_marker(self, adapter):
+        assert adapter._dispatch_memory_source("claude-ops-abc123") == "claude.ai"
+        assert adapter._dispatch_memory_source("telegram") == "unknown"
+
+    def test_write_dispatch_memory_truncates_and_spills(self, adapter, tmp_path):
+        long_output = "A" * (api_server_mod.DISPATCH_MEMORY_OUTPUT_LIMIT + 25)
+        run_id = "run_1234567890abcdef"
+        spill_path = tmp_path / f"{run_id}.txt"
+
+        with (
+            patch.object(api_server_mod, "DISPATCH_MEMORY_DIR", tmp_path),
+        ):
+            prepared_output, file_note = adapter._prepare_dispatch_output(
+                run_id=run_id,
+                output_text=long_output,
+            )
+
+        assert file_note == str(spill_path)
+        assert spill_path.exists()
+        spilled = spill_path.read_text(encoding="utf-8")
+        assert spilled == long_output
+        assert "[output truncated]" in prepared_output
+        assert str(spill_path) in prepared_output
+
+    @pytest.mark.asyncio
+    async def test_schedule_dispatch_memory_write_failure_is_swallowed(self, adapter):
+        with patch.object(adapter, "_write_dispatch_memory", side_effect=RuntimeError("db down")):
+            adapter._schedule_dispatch_memory_write(
+                run_id="run_123",
+                status="completed",
+                task_text="ship it",
+                output_text="done",
+                usage={"total_tokens": 1},
+                source="claude.ai",
+                started_at=time.time() - 1,
+                completed_at=time.time(),
+            )
+            await asyncio.sleep(0.05)
+
+    def test_split_claude_exchange_for_discord_adds_part_markers(self):
+        body = "x" * 5000
+        chunks = api_server_mod._split_claude_exchange_for_discord(
+            timestamp="2026-04-16T12:00:00Z",
+            run_id="run_123",
+            direction="claude->clarence",
+            raw_body=body,
+        )
+        assert len(chunks) >= 3
+        for idx, chunk in enumerate(chunks, start=1):
+            assert len(chunk) <= api_server_mod.DISCORD_MESSAGE_CHAR_LIMIT
+            assert "timestamp: 2026-04-16T12:00:00Z" in chunk
+            assert "run_id: run_123" in chunk
+            assert "direction: claude->clarence" in chunk
+            assert f"part: [{idx}/{len(chunks)}]" in chunk
+
+    @pytest.mark.asyncio
+    async def test_post_claude_exchange_to_discord_failure_is_swallowed(self, adapter):
+        with patch.object(adapter, "_discord_claude_log_target", return_value=("tok", "chan")):
+            with patch("tools.send_message_tool._send_discord", new=AsyncMock(return_value={"error": "boom"})):
+                result = await adapter._post_claude_exchange_to_discord(
+                    run_id="run_123",
+                    direction="clarence->claude",
+                    payload={"ok": True},
+                )
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_responses_endpoint_logs_inbound_and_outbound(self, adapter):
+        app = _create_app(adapter)
+        mock_result = {"final_response": "Done", "messages": [], "api_calls": 1}
+        async with TestClient(TestServer(app)) as cli:
+            with (
+                patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run,
+                patch.object(adapter, "_schedule_claude_clarence_log") as mock_log,
+                patch.object(adapter, "_schedule_dispatch_memory_write") as mock_dispatch_memory,
+            ):
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={
+                        "model": "hermes-agent",
+                        "input": "hello",
+                        "instructions": "ordinary prompt",
+                    },
+                )
+        assert resp.status == 200
+        assert mock_log.call_count == 2
+        assert mock_dispatch_memory.call_count == 1
+        assert mock_dispatch_memory.call_args.kwargs["status"] == "completed"
+        assert mock_dispatch_memory.call_args.kwargs["task_text"] == "hello"
+        assert mock_log.call_args_list[0].kwargs["direction"] == "claude->clarence"
+        assert mock_log.call_args_list[1].kwargs["direction"] == "clarence->claude"
+        assert mock_log.call_args_list[0].kwargs["run_id"] == mock_log.call_args_list[1].kwargs["run_id"]
+
+    @pytest.mark.asyncio
+    async def test_responses_endpoint_logs_failure_dispatch_memory(self, adapter):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with (
+                patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run,
+                patch.object(adapter, "_schedule_dispatch_memory_write") as mock_dispatch_memory,
+            ):
+                mock_run.side_effect = RuntimeError("Boom")
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={"model": "hermes-agent", "input": "hello"},
+                )
+
+        assert resp.status == 500
+        assert mock_dispatch_memory.call_count == 1
+        assert mock_dispatch_memory.call_args.kwargs["status"] == "failed"
+        assert mock_dispatch_memory.call_args.kwargs["output_text"] == "Boom"
+
+    @pytest.mark.asyncio
+    async def test_runs_endpoint_logs_inbound_and_outbound(self, adapter):
+        app = _create_app(adapter)
+        app.router.add_post("/v1/runs", adapter._handle_runs)
+        async with TestClient(TestServer(app)) as cli:
+            with (
+                patch.object(adapter, "_schedule_claude_clarence_log") as mock_log,
+                patch.object(adapter, "_schedule_dispatch_memory_write") as mock_dispatch_memory,
+                patch.object(adapter, "_create_agent") as mock_create_agent,
+            ):
+                class _FakeAgent:
+                    session_prompt_tokens = 0
+                    session_completion_tokens = 0
+                    session_total_tokens = 0
+
+                    def run_conversation(self, user_message, conversation_history, task_id):
+                        return {"final_response": "async done"}
+
+                mock_create_agent.return_value = _FakeAgent()
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={
+                        "model": "hermes-agent",
+                        "input": "hello",
+                        "instructions": "ordinary prompt",
+                    },
+                )
+                assert resp.status == 202
+                await asyncio.sleep(0.05)
+
+        assert mock_log.call_count >= 2
+        assert mock_dispatch_memory.call_count == 1
+        assert mock_dispatch_memory.call_args.kwargs["status"] == "completed"
+        assert mock_log.call_args_list[0].kwargs["direction"] == "claude->clarence"
+        assert any(call.kwargs.get("direction") == "clarence->claude" for call in mock_log.call_args_list[1:])
+
+    @pytest.mark.asyncio
+    async def test_runs_endpoint_logs_failure_dispatch_memory(self, adapter):
+        app = _create_app(adapter)
+        app.router.add_post("/v1/runs", adapter._handle_runs)
+        async with TestClient(TestServer(app)) as cli:
+            with (
+                patch.object(adapter, "_schedule_dispatch_memory_write") as mock_dispatch_memory,
+                patch.object(adapter, "_create_agent") as mock_create_agent,
+            ):
+                class _FailingAgent:
+                    session_prompt_tokens = 0
+                    session_completion_tokens = 0
+                    session_total_tokens = 0
+
+                    def run_conversation(self, user_message, conversation_history, task_id):
+                        raise RuntimeError("async boom")
+
+                mock_create_agent.return_value = _FailingAgent()
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={"model": "hermes-agent", "input": "hello"},
+                )
+                assert resp.status == 202
+                await asyncio.sleep(0.05)
+
+        assert mock_dispatch_memory.call_count == 1
+        assert mock_dispatch_memory.call_args.kwargs["status"] == "failed"
+        assert mock_dispatch_memory.call_args.kwargs["output_text"] == "async boom"
+
+
