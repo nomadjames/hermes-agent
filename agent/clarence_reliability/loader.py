@@ -92,13 +92,9 @@ def validate_case_dict(data: Mapping[str, Any], *, path: Path | None = None) -> 
     if not isinstance(checks, list) or not checks:
         errors.append("checks must be a non-empty list")
     else:
-        known_verifiers: set[str] | None = None
-        try:
-            from .verifiers import names as verifier_names
+        from .verifiers import names as verifier_names
 
-            known_verifiers = set(verifier_names())
-        except Exception:
-            known_verifiers = None
+        known_verifiers = set(verifier_names())
         for idx, check in enumerate(checks):
             if not isinstance(check, Mapping):
                 errors.append(f"checks[{idx}] must be a mapping")
