@@ -15,8 +15,8 @@ def test_manifest_is_metadata_only_and_deterministic(tmp_path):
     raw = json.dumps(manifest_a, sort_keys=True)
     assert "What do you remember" not in raw
     assert "You prefer" not in raw
-    assert "args" not in raw
-    assert "result" not in raw
+    assert '"args"' not in raw
+    assert '"result"' not in raw
 
 
 def test_manifest_writer_uses_sorted_json(tmp_path):

@@ -21,7 +21,8 @@ def test_builtin_cases_pass_offline(tmp_path):
 
     result = run_cases(cases, repo_root=tmp_path, case_root=tmp_path)
 
-    assert len(cases) == 5
+    assert len(cases) == len(BUILTIN_CASE_IDS)
+    assert len(cases) >= 20
     assert tuple(case.id for case in cases) == BUILTIN_CASE_IDS
     assert result.ok, format_run_result(result)
 
