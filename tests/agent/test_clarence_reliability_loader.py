@@ -1,3 +1,4 @@
+import builtins
 from pathlib import Path
 
 import pytest
@@ -79,6 +80,20 @@ def test_load_case_data_rejects_unknown_verifier_names():
 
     with pytest.raises(ValueError, match="unknown verifier"):
         load_case_data(data)
+
+
+def test_load_case_data_fails_closed_when_verifier_registry_import_fails(monkeypatch):
+    real_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "verifiers" and level == 1 and fromlist == ("names",):
+            raise ImportError("simulated verifier registry import failure")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    with pytest.raises(ImportError, match="simulated verifier registry import failure"):
+        load_case_data(minimal_case())
 
 
 def test_load_case_data_requires_tool_policy_verifiers_when_expected_tools_declared():

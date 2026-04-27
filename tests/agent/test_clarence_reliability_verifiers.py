@@ -38,6 +38,10 @@ def test_no_production_memory_side_effects_fails_on_memory_write(tmp_path):
     assert "production memory side effect" in finding_messages(findings)
 
 
+def test_verify_context_has_no_production_side_effect_bypass(tmp_path):
+    assert not hasattr(context(tmp_path), "allow_production_side_effects")
+
+
 def test_no_public_send_fails_on_production_dispatch(tmp_path):
     case = make_case(
         [{"type": "gateway_send", "name": "discord.channel.send", "scope": "production"}],
