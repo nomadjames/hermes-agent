@@ -25,7 +25,6 @@ class Finding:
 class VerifyContext:
     repo_root: Path
     case_root: Path
-    allow_production_side_effects: bool = False
 
 VerifierFn = Callable[[Case, Trace, VerifyContext, VerifierSpec], list[Finding]]
 _REGISTRY: dict[str, VerifierFn] = {}
@@ -120,8 +119,6 @@ def deterministic_case(case: Case, trace: Trace, context: VerifyContext, spec: V
 
 @register("offline_only")
 def offline_only(case: Case, trace: Trace, context: VerifyContext, spec: VerifierSpec) -> list[Finding]:
-    if context.allow_production_side_effects:
-        return []
     findings: list[Finding] = []
     for event in trace.events:
         if event.scope == "production" and event.type in _SIDE_EFFECT_TYPES:
@@ -139,8 +136,6 @@ def _no_production_side_effect(
     patterns: tuple[str, ...],
     label: str,
 ) -> list[Finding]:
-    if context.allow_production_side_effects:
-        return []
     findings: list[Finding] = []
     for event in trace.events:
         if event.scope != "production":
@@ -172,8 +167,6 @@ def no_production_skill_side_effects(case: Case, trace: Trace, context: VerifyCo
 
 @register("no_public_send")
 def no_public_send(case: Case, trace: Trace, context: VerifyContext, spec: VerifierSpec) -> list[Finding]:
-    if context.allow_production_side_effects:
-        return []
     findings: list[Finding] = []
     for event in trace.events:
         if event.scope == "production" and (event.type == "gateway_send" or _matches(event.name, _PUBLIC_SEND_PATTERNS)):
