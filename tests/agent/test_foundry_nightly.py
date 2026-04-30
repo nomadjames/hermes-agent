@@ -191,6 +191,12 @@ def test_successful_run_writes_only_under_run_dir(tmp_path, monkeypatch):
     assert (run_dir / "metadata" / "git.json").exists()
     assert (run_dir / "reliability" / "result.json").exists()
     assert len(sorted((run_dir / "candidates").rglob("*.json"))) == 3
+    assert summary["delivery"] == {"mode": "local_only", "public_delivery": False}
+    assert summary["review"]["review_required"] is True
+    assert summary["review"]["auto_apply"] is False
+    assert summary["review"]["durable_writes_allowed"] is False
+    assert summary["review"]["candidate_count"] == 3
+    assert len(summary["review"]["candidate_paths"]) == 3
     assert (run_dir / "routing_smoke" / "results.json").exists()
     assert not (tmp_path / "hermes-home" / "foundry" / "candidates").exists()
     assert not (tmp_path / "hermes-home" / "memories").exists()

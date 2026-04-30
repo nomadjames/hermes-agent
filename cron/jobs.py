@@ -435,6 +435,8 @@ def create_job(
     context_from: Optional[Union[str, List[str]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
+    paused: bool = False,
+    paused_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -466,6 +468,9 @@ def create_job(
                 terminal/file/code_exec tools use it as their working directory
                 (via TERMINAL_CWD).  When unset, the old behaviour is preserved
                 (no context files injected, tools use the scheduler's cwd).
+        paused: Create the job atomically disabled with state=paused and no
+                next_run_at. This avoids a create-then-pause scheduler race.
+        paused_reason: Optional reason recorded when paused=True.
 
     Returns:
         The created job dict
@@ -499,6 +504,12 @@ def create_job(
     normalized_toolsets = [str(t).strip() for t in enabled_toolsets if str(t).strip()] if enabled_toolsets else None
     normalized_toolsets = normalized_toolsets or None
     normalized_workdir = _normalize_workdir(workdir)
+    normalized_paused_reason = str(paused_reason).strip() if isinstance(paused_reason, str) else None
+    normalized_paused_reason = normalized_paused_reason or None
+    enabled = not bool(paused)
+    state = "paused" if paused else "scheduled"
+    paused_at = now if paused else None
+    next_run_at = None if paused else compute_next_run(parsed_schedule)
 
     # Normalize context_from: accept str or list of str, store as list or None
     if isinstance(context_from, str):
@@ -526,12 +537,12 @@ def create_job(
             "times": repeat,  # None = forever
             "completed": 0
         },
-        "enabled": True,
-        "state": "scheduled",
-        "paused_at": None,
-        "paused_reason": None,
+        "enabled": enabled,
+        "state": state,
+        "paused_at": paused_at,
+        "paused_reason": normalized_paused_reason if paused else None,
         "created_at": now,
-        "next_run_at": compute_next_run(parsed_schedule),
+        "next_run_at": next_run_at,
         "last_run_at": None,
         "last_status": None,
         "last_error": None,

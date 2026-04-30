@@ -172,6 +172,8 @@ def cron_create(args):
         skills=_normalize_skills(getattr(args, "skill", None), getattr(args, "skills", None)),
         script=getattr(args, "script", None),
         workdir=getattr(args, "workdir", None),
+        paused=getattr(args, "paused", False),
+        reason=getattr(args, "reason", None),
     )
     if not result.get("success"):
         print(color(f"Failed to create job: {result.get('error', 'unknown error')}", Colors.RED))
@@ -179,6 +181,8 @@ def cron_create(args):
     print(color(f"Created job: {result['job_id']}", Colors.GREEN))
     print(f"  Name: {result['name']}")
     print(f"  Schedule: {result['schedule']}")
+    print(f"  State: {result.get('state', 'scheduled')}")
+    print(f"  Deliver: {result.get('deliver', 'local')}")
     if result.get("skills"):
         print(f"  Skills: {', '.join(result['skills'])}")
     job_data = result.get("job", {})
