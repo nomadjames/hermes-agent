@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping
@@ -77,6 +78,27 @@ def default_review_log_path() -> Path:
 
 def _utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def candidate_file_fingerprint(path: str | Path) -> dict[str, Any]:
+    """Return a content fingerprint for a local candidate file.
+
+    Phase 5 binds manual application to the exact bytes James reviewed.
+    A review-by-key is not enough because candidate files are mutable local
+    artifacts. Symlinks are refused so an approval cannot be redirected to
+    different bytes after review.
+    """
+
+    candidate_path = Path(path)
+    if candidate_path.is_symlink():
+        raise FoundryReviewError(f"candidate file is a symlink: {candidate_path}")
+    if not candidate_path.is_file():
+        raise FoundryReviewError(f"candidate file is missing: {candidate_path}")
+    payload = candidate_path.read_bytes()
+    return {
+        "candidate_sha256": hashlib.sha256(payload).hexdigest(),
+        "candidate_size": len(payload),
+    }
 
 
 def _safe_json_load(path: Path) -> Mapping[str, Any]:
@@ -263,6 +285,7 @@ def record_review(
     )
     assert record.candidate is not None
     validate_candidate(record.candidate)
+    fingerprint = candidate_file_fingerprint(record.path)
 
     event = {
         "schema_version": SCHEMA_VERSION,
@@ -272,6 +295,8 @@ def record_review(
         "reviewer": reviewer_text,
         "note": str(note or "")[:2000],
         "candidate_path": str(record.path),
+        "candidate_sha256": fingerprint["candidate_sha256"],
+        "candidate_size": fingerprint["candidate_size"],
         "candidate_id": record.candidate_id,
         "kind": record.kind,
         "title": record.title,
