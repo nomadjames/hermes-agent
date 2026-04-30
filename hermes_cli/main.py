@@ -8397,6 +8397,15 @@ For more help on a command:
         "--workdir",
         help="Absolute path for the job to run from. Injects AGENTS.md / CLAUDE.md / .cursorrules from that directory and uses it as the cwd for terminal/file/code_exec tools. Omit to preserve old behaviour (no project context files).",
     )
+    cron_create.add_argument(
+        "--paused",
+        action="store_true",
+        help="Create the job atomically paused with no next_run_at, so it cannot fire before review.",
+    )
+    cron_create.add_argument(
+        "--reason",
+        help="Optional pause reason when creating with --paused.",
+    )
 
     # cron edit
     cron_edit = cron_subparsers.add_parser(

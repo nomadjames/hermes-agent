@@ -226,10 +226,29 @@ def _summary_base(*, run_id: str, run_dir: Path, repo_root: Path) -> dict[str, A
         "failure_code": None,
         "steps": [],
         "artifacts": {},
+        "delivery": {
+            "mode": "local_only",
+            "public_delivery": False,
+        },
+        "review": {
+            "review_required": True,
+            "auto_apply": False,
+            "durable_writes_allowed": False,
+            "candidate_count": 0,
+            "candidate_paths": [],
+        },
     }
 
 
 def _finish_summary(run_dir: Path, summary: dict[str, Any], *, ok: bool, failure_code: str | None = None) -> dict[str, Any]:
+    candidate_paths = [step["candidate_path"] for step in summary.get("steps", []) if step.get("candidate_path")]
+    review = summary.setdefault("review", {})
+    review["candidate_count"] = len(candidate_paths)
+    review["candidate_paths"] = candidate_paths
+    review.setdefault("review_required", True)
+    review.setdefault("auto_apply", False)
+    review.setdefault("durable_writes_allowed", False)
+    summary.setdefault("delivery", {"mode": "local_only", "public_delivery": False})
     summary["ok"] = ok
     summary["status"] = "passed" if ok else "failed"
     summary["failure_code"] = failure_code

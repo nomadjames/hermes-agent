@@ -14,7 +14,12 @@ from agent.clarence_foundry.nightly import FoundryNightlyError, run_nightly  # n
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the local-only Clarence Foundry Phase 3 nightly wrapper.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the local-only Clarence Foundry Phase 3 nightly wrapper. "
+            "Outputs remain local and generated candidates require review with scripts/clarence_foundry_review.py."
+        )
+    )
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--timeout-seconds", type=int, default=120)
