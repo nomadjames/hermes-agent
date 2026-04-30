@@ -62,7 +62,7 @@ def test_list_candidates_discovers_run_local_candidate(tmp_path, monkeypatch):
 def test_approve_records_local_review_without_applying(tmp_path, monkeypatch):
     home = tmp_path / "hermes-home"
     monkeypatch.setenv("HERMES_HOME", str(home))
-    _write_candidate(home)
+    candidate_path = _write_candidate(home)
     review = import_review()
 
     event = review.record_review(
@@ -74,6 +74,8 @@ def test_approve_records_local_review_without_applying(tmp_path, monkeypatch):
 
     log_path = home / "foundry" / "reviews" / "review_log.jsonl"
     assert event["decision"] == "approved"
+    assert len(event["candidate_sha256"]) == 64
+    assert event["candidate_size"] == candidate_path.stat().st_size
     assert event["auto_apply"] is False
     assert event["review_log_write"] is True
     assert event["durable_writes_allowed"] is False
