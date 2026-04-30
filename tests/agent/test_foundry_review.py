@@ -75,6 +75,7 @@ def test_approve_records_local_review_without_applying(tmp_path, monkeypatch):
     log_path = home / "foundry" / "reviews" / "review_log.jsonl"
     assert event["decision"] == "approved"
     assert event["auto_apply"] is False
+    assert event["review_log_write"] is True
     assert event["durable_writes_allowed"] is False
     assert log_path.exists()
     assert len(log_path.read_text(encoding="utf-8").splitlines()) == 1

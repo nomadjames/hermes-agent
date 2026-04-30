@@ -803,6 +803,9 @@ def get_due_jobs() -> List[Dict[str, Any]]:
     needs_save = False
 
     for job in jobs:
+        if job.get("state") == "paused":
+            continue
+
         if not job.get("enabled", True):
             continue
 

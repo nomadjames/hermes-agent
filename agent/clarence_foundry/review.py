@@ -248,7 +248,7 @@ def record_review(
     candidates_root: str | Path | None = None,
     review_log_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Append a local review decision. Approval never applies the candidate."""
+    """Append a local review-log decision. Approval never applies the candidate."""
 
     normalized_decision = str(decision).strip().lower()
     if normalized_decision not in _ALLOWED_DECISIONS:
@@ -278,6 +278,7 @@ def record_review(
         "proposal_only": True,
         "review_required": True,
         "auto_apply": False,
+        "review_log_write": True,
         "durable_writes_allowed": False,
     }
 

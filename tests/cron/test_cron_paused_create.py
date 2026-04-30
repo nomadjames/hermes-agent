@@ -1,5 +1,6 @@
 import json
 from argparse import Namespace
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -32,6 +33,26 @@ def test_create_job_can_be_atomically_paused(tmp_cron_dir):
     assert get_job(job["id"])["state"] == "paused"
     assert list_jobs() == []
     assert list_jobs(include_disabled=True)[0]["id"] == job["id"]
+    assert get_due_jobs() == []
+
+
+def test_paused_state_defensively_blocks_due_jobs_even_if_enabled_flag_drifts(tmp_cron_dir):
+    from cron.jobs import create_job, get_due_jobs, load_jobs, save_jobs
+
+    job = create_job(
+        prompt="Review local Foundry artifacts only",
+        schedule="every 1h",
+        deliver="local",
+        paused=True,
+        paused_reason="manual review gate",
+    )
+
+    jobs = load_jobs()
+    jobs[0]["enabled"] = True
+    jobs[0]["next_run_at"] = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    save_jobs(jobs)
+
+    assert job["state"] == "paused"
     assert get_due_jobs() == []
 
 
