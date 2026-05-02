@@ -258,6 +258,7 @@ def cronjob(
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
     reason: Optional[str] = None,
+    paused: bool = False,
     script: Optional[str] = None,
     context_from: Optional[Union[str, List[str]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
@@ -314,6 +315,8 @@ def cronjob(
                 context_from=context_from,
                 enabled_toolsets=enabled_toolsets or None,
                 workdir=_normalize_optional_job_value(workdir),
+                paused=bool(paused),
+                paused_reason=reason,
             )
             return json.dumps(
                 {
@@ -325,9 +328,15 @@ def cronjob(
                     "schedule": job["schedule_display"],
                     "repeat": _repeat_display(job),
                     "deliver": job.get("deliver", "local"),
+                    "state": job.get("state"),
+                    "enabled": job.get("enabled", True),
                     "next_run_at": job["next_run_at"],
                     "job": _format_job(job),
-                    "message": f"Cron job '{job['name']}' created.",
+                    "message": (
+                        f"Cron job '{job['name']}' created paused."
+                        if job.get("state") == "paused"
+                        else f"Cron job '{job['name']}' created."
+                    ),
                 },
                 indent=2,
             )
@@ -500,7 +509,15 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
             },
             "deliver": {
                 "type": "string",
-                "description": "Omit this parameter to auto-deliver back to the current chat and topic (recommended). Auto-detection preserves thread/topic context. Only set explicitly when the user asks to deliver somewhere OTHER than the current conversation. Values: 'origin' (same as omitting), 'local' (no delivery, save only), or platform:chat_id:thread_id for a specific destination. Examples: 'telegram:-1001234567890:17585', 'discord:#engineering', 'sms:+15551234567'. WARNING: 'platform:chat_id' without :thread_id loses topic targeting."
+                "description": "Omit this parameter to auto-deliver back to the current chat and topic (recommended). Auto-detection preserves thread/topic context. Only set explicitly when the user asks to deliver somewhere OTHER than the current conversation. Values: 'origin' (same as omitting), 'local' (no delivery, save only), or platform:chat_id:thread_id for a specific destination. Examples: 'telegram:-1001234567890:17585', 'discord:#engineering', 'sms:+155****4567'. WARNING: 'platform:chat_id' without :thread_id loses topic targeting."
+            },
+            "paused": {
+                "type": "boolean",
+                "description": "For create: atomically create the job disabled with state='paused' and no next_run_at. Use this when a job must be reviewed before it can ever fire."
+            },
+            "reason": {
+                "type": "string",
+                "description": "Optional pause reason for pause or create with paused=true."
             },
             "skills": {
                 "type": "array",
@@ -591,6 +608,7 @@ registry.register(
         provider=_mo[0] or args.get("provider"),
         base_url=args.get("base_url"),
         reason=args.get("reason"),
+        paused=args.get("paused", False),
         script=args.get("script"),
         context_from=args.get("context_from"),
         enabled_toolsets=args.get("enabled_toolsets"),
