@@ -69,6 +69,13 @@ class TestApiServerRouteTable:
         assert "/p/{profile}/v1/models" in mirrored
         assert "/p/{profile}/v1/chat/completions" in mirrored
 
+    def test_route_table_includes_claude_handoff_with_profile_mirror(self):
+        adapter = _make_adapter(multiplex=True)
+        routes = {(method, path) for method, path, _handler in adapter._http_route_table()}
+        assert ("POST", "/v1/claude/handoff-memory") in routes
+        mirrored = {(method, f"/p/{{profile}}{path}") for method, path in routes}
+        assert ("POST", "/p/{profile}/v1/claude/handoff-memory") in mirrored
+
 
 class TestApiServerModelsUnderProfile:
     def test_resolve_model_name_follows_active_profile(self, monkeypatch):
