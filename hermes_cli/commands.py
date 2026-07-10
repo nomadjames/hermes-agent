@@ -387,7 +387,7 @@ ACTIVE_SESSION_BYPASS_COMMANDS: frozenset[str] = frozenset(
 
 
 def should_bypass_active_session(command_name: str | None) -> bool:
-    """Return True for any resolvable slash command.
+    """Return True for any resolvable built-in or installed-skill command.
 
     Rationale: every gateway-registered slash command either has a
     specific Level-2 handler in gateway/run.py (/stop, /new, /model,
@@ -403,10 +403,23 @@ def should_bypass_active_session(command_name: str | None) -> bool:
     interrupt the agent AND get discarded, producing a zero-char
     response. See issue #5057 / PRs #6252, #10370, #4665.
 
-    ACTIVE_SESSION_BYPASS_COMMANDS remains the subset of commands with
-    explicit Level-2 handlers; the rest fall through to the catch-all.
+    Installed-skill slashes also need to bypass the generic busy-input path.
+    The gateway runner expands them and queues the resulting skill prompt as a
+    separate next turn, preserving the active task instead of interrupting it.
+
+    ACTIVE_SESSION_BYPASS_COMMANDS remains the subset of built-in commands
+    with explicit Level-2 handlers; the rest fall through to the catch-all.
     """
-    return resolve_command(command_name) is not None if command_name else False
+    if not command_name:
+        return False
+    if resolve_command(command_name) is not None:
+        return True
+    try:
+        from agent.skill_commands import resolve_skill_command_key
+
+        return resolve_skill_command_key(command_name) is not None
+    except Exception:
+        return False
 
 
 def _resolve_config_gates() -> set[str]:

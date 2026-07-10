@@ -10460,6 +10460,46 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return "Queued for the next turn."
                 return f"Queued for the next turn. ({depth} queued)"
 
+            # Installed skill slash commands bypass the adapter's generic busy
+            # input path so they cannot interrupt the active task. Expand the
+            # skill now and queue that model-facing prompt as its own FIFO turn;
+            # queueing the raw slash text would defer resolution and make busy
+            # behavior depend on the global interrupt/steer setting.
+            if _cmd_def_inner is None and _evt_cmd:
+                try:
+                    from agent.skill_commands import resolve_skill_command_key
+
+                    _skill_cmd_key = resolve_skill_command_key(_evt_cmd)
+                except Exception:
+                    _skill_cmd_key = None
+                if _skill_cmd_key is not None:
+                    try:
+                        from agent import skill_commands as _busy_skill_commands
+
+                        queued_text = _busy_skill_commands.build_skill_invocation_message(
+                            _skill_cmd_key,
+                            event.get_command_args().strip(),
+                            task_id=_quick_key,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Busy skill command /%s failed to load: %s",
+                            _evt_cmd,
+                            exc,
+                        )
+                        return f"Failed to load skill for /{_evt_cmd}."
+                    if not queued_text:
+                        return f"Failed to load skill for /{_evt_cmd}."
+                    event.text = queued_text
+                    adapter = self._adapter_for_source(source)
+                    if adapter:
+                        self._enqueue_fifo(_quick_key, event, adapter)
+                    depth = self._queue_depth(_quick_key, adapter=adapter)
+                    label = _skill_cmd_key.lstrip("/")
+                    if depth <= 1:
+                        return f"Queued /{label} skill prompt for the next turn."
+                    return f"Queued /{label} skill prompt for the next turn. ({depth} queued)"
+
             # /steer <prompt> — inject mid-run after the next tool call.
             # Unlike /queue (turn boundary), /steer lands BETWEEN tool-call
             # iterations inside the same agent run, by appending to the
