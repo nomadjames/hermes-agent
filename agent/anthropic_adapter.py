@@ -1412,8 +1412,12 @@ _OAUTH_TOKEN_URL = _OAUTH_TOKEN_URLS[0]
 # (build_anthropic_kwargs) still uses the ``claude-code/`` UA + ``x-app: cli`` —
 # that fingerprint is required there and is NOT throttled on the messages API.
 _OAUTH_TOKEN_USER_AGENT = "axios/1.7.9"
-_OAUTH_REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback"
-_OAUTH_SCOPES = "org:create_api_key user:profile user:inference"
+_OAUTH_AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize"
+_OAUTH_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
+_OAUTH_SCOPES = (
+    "org:create_api_key user:profile user:inference "
+    "user:sessions:claude_code user:mcp_servers user:file_upload"
+)
 def _get_hermes_oauth_file() -> Path:
     return get_hermes_home() / ".anthropic_oauth.json"
 
@@ -1452,7 +1456,7 @@ def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
     }
     from urllib.parse import urlencode
 
-    auth_url = f"https://claude.ai/oauth/authorize?{urlencode(params)}"
+    auth_url = f"{_OAUTH_AUTHORIZE_URL}?{urlencode(params)}"
 
     print()
     print("Authorize Hermes with your Claude Pro/Max subscription.")
