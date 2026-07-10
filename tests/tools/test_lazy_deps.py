@@ -94,6 +94,9 @@ class TestAllowlist:
                 assert ld._spec_is_safe(spec), \
                     f"{feature}: spec {spec!r} fails safety check"
 
+    def test_trace_upload_pin_preserves_transformers_5_11_compatibility(self):
+        assert ld.LAZY_DEPS["tool.trace_upload"] == ("huggingface-hub==1.5.0",)
+
     def test_feature_install_command_returns_pip_invocation(self):
         cmd = ld.feature_install_command("memory.honcho")
         assert cmd is not None
