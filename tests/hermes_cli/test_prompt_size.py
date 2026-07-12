@@ -9,6 +9,7 @@ import pytest
 from hermes_cli.prompt_size import (
     _SKILLS_BLOCK_RE,
     _build_inspection_agent,
+    cmd_prompt_size,
     compute_prompt_breakdown,
     render_breakdown,
 )
@@ -169,3 +170,22 @@ def test_json_serializable(isolated_home):
     data = compute_prompt_breakdown("cli")
     # Round-trips cleanly for ``--json`` output.
     assert json.loads(json.dumps(data)) == json.loads(json.dumps(data))
+
+
+def test_command_discovers_mcp_before_measuring_and_shuts_down(
+    isolated_home, monkeypatch, capsys
+):
+    calls = []
+    monkeypatch.setattr(
+        "tools.mcp_tool.discover_mcp_tools",
+        lambda: calls.append("discover") or [],
+    )
+    monkeypatch.setattr(
+        "tools.mcp_tool.shutdown_mcp_servers",
+        lambda: calls.append("shutdown"),
+    )
+
+    cmd_prompt_size(SimpleNamespace(platform="cli", json=True))
+
+    assert calls == ["discover", "shutdown"]
+    assert json.loads(capsys.readouterr().out)["platform"] == "cli"

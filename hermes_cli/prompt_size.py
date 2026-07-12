@@ -2,13 +2,13 @@
 
 Reports a byte/char breakdown of the system prompt the agent would build for
 a fresh session — system prompt total, the ``<available_skills>`` index,
-memory + user profile, and tool-schema JSON. Lets users see where their fixed
-prompt budget goes (issue #34667) without parsing a saved session JSON by hand.
+memory + user profile, and tool-schema JSON. The command discovers configured
+MCP servers first so its schema count matches a real startup instead of silently
+reporting only built-in tools.
 
-The diagnostic builds a real inspection agent (so the numbers match what
-actually ships on the wire) but never makes a network call: it passes dummy
-credentials so ``AIAgent.__init__`` takes the direct-construction path, then
-calls ``build_system_prompt_parts`` / inspects ``agent.tools`` offline.
+The diagnostic builds a real inspection agent and discovers configured MCP
+servers, but it never calls the selected language model or invokes an MCP tool.
+Dummy provider credentials keep prompt construction itself offline.
 """
 
 from __future__ import annotations
@@ -150,11 +150,23 @@ def cmd_prompt_size(args: Any) -> None:
     """Entry point for ``hermes prompt-size``."""
     platform = getattr(args, "platform", "cli") or "cli"
     as_json = getattr(args, "json", False)
+    shutdown_mcp = None
     try:
+        import importlib
+
+        mcp_tool = importlib.import_module("tools.mcp_tool")
+        mcp_tool.discover_mcp_tools()
+        shutdown_mcp = mcp_tool.shutdown_mcp_servers
         data = compute_prompt_breakdown(platform)
     except Exception as e:
         print(f"Could not compute prompt-size breakdown: {e}")
         return
+    finally:
+        if shutdown_mcp is not None:
+            try:
+                shutdown_mcp()
+            except Exception:
+                pass
     if as_json:
         print(json.dumps(data, ensure_ascii=False, indent=2))
     else:

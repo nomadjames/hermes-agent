@@ -464,6 +464,27 @@ class TestBuildSkillsSystemPrompt:
         # Disclosure note explains the demotion and how to load.
         assert "skill_view" in result
 
+    def test_profile_config_compact_categories_demoted_to_names_only(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            "skills:\n  compact_categories: [creative]\n"
+        )
+        for cat, name in (("creative", "pixel-art"), ("software-development", "tdd")):
+            d = tmp_path / "skills" / cat / name
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: Does {name} things\n---\n"
+            )
+
+        result = build_skills_system_prompt()
+
+        assert "creative [names only]: pixel-art" in result
+        assert "Does pixel-art things" not in result
+        assert "Does tdd things" in result
+        assert "skills_list(category=...)" in result
+
     def test_compact_categories_demote_nested_and_miss_cache_separately(
         self, monkeypatch, tmp_path
     ):

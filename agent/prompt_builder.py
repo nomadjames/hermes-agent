@@ -1518,13 +1518,36 @@ def build_skills_system_prompt(
     in the local dir.  Local skills take precedence when names collide.
 
     ``compact_categories`` (e.g. from the coding posture — see
-    agent/coding_context.py) demotes whole categories to a names-only line in
-    the rendered index. Nothing is ever hidden: every skill name stays
-    visible and loadable via ``skill_view`` / ``skills_list``; only the
-    descriptions are dropped, and a footer note explains the demotion.
+    agent/coding_context.py) and profile config ``skills.compact_categories``
+    demote whole categories to a names-only line in the rendered index.
+    Nothing is ever hidden: every skill name stays visible and loadable via
+    ``skill_view`` / ``skills_list``; only descriptions are dropped.
     """
     skills_dir = get_skills_dir()
     external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
+
+    # Profile-configured demotion provides the same lossless, names-only index
+    # used by coding focus mode for general sessions. This keeps long-tail
+    # skills discoverable without paying every description on every turn.
+    configured_compact: set[str] = set()
+    try:
+        from hermes_cli.config import load_config
+
+        _cfg = load_config() or {}
+        _raw_skills_cfg = _cfg.get("skills")
+        _skills_cfg = _raw_skills_cfg if isinstance(_raw_skills_cfg, dict) else {}
+        _raw_compact = _skills_cfg.get("compact_categories") or []
+        if isinstance(_raw_compact, (list, tuple, set, frozenset)):
+            configured_compact = {
+                str(category).strip()
+                for category in _raw_compact
+                if str(category).strip()
+            }
+    except Exception:
+        configured_compact = set()
+    compact_categories = frozenset(
+        set(compact_categories or frozenset()) | configured_compact
+    )
 
     if not skills_dir.exists() and not external_dirs:
         return ""
@@ -1692,9 +1715,9 @@ def build_skills_system_prompt(
     hidden_note = ""
     if demoted:
         hidden_note = (
-            "\n(Categories marked [names only] are outside the current coding "
-            "context, so their descriptions are omitted — the skills work "
-            "normally and load with skill_view(name) as usual.)"
+            "\n(Categories marked [names only] omit descriptions to reduce "
+            "startup noise. Every skill remains loadable with skill_view(name); "
+            "use skills_list(category=...) when a category needs expansion.)"
         )
 
     if not skills_by_category:
