@@ -294,6 +294,52 @@ def _pinned_guard(name: str) -> Optional[str]:
     return None
 
 
+def _background_review_disabled_guard(
+    action: str,
+    name: str,
+) -> Optional[Dict[str, Any]]:
+    """Fence every autonomous skill mutation when live review is disabled."""
+    try:
+        from tools.skill_provenance import is_background_review
+        if not is_background_review():
+            return None
+    except Exception:
+        return None
+
+    # Re-read the live profile setting at the write boundary. A parent agent can
+    # have cached a positive nudge interval before the user disables background
+    # skill review; without this check, that stale session can still launch one
+    # final autonomous writer after the config change.
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config()
+        skills_cfg = cfg.get("skills", {}) if isinstance(cfg, dict) else {}
+        if not isinstance(skills_cfg, dict):
+            raise ValueError("skills config must be a mapping")
+        interval = int(skills_cfg.get("creation_nudge_interval", 10))
+    except Exception:
+        return {
+            "success": False,
+            "error": (
+                f"Refusing background curator {action} for skill '{name}': "
+                "the live background skill-review setting could not be "
+                "verified. Foreground user-directed skill edits remain allowed."
+            ),
+        }
+    if interval <= 0:
+        return {
+            "success": False,
+            "error": (
+                f"Refusing background curator {action} for skill '{name}': "
+                "background skill review is disabled by "
+                "skills.creation_nudge_interval=0. Foreground user-directed "
+                "skill edits remain allowed."
+            ),
+        }
+    return None
+
+
 def _background_review_write_guard(
     name: str,
     skill_dir: Path,
@@ -312,6 +358,10 @@ def _background_review_write_guard(
             return None
     except Exception:
         return None
+
+    disabled = _background_review_disabled_guard(action, name)
+    if disabled:
+        return disabled
 
     # Pin must be respected by autonomous maintenance. The curator already
     # skips pinned skills from every auto-transition; the background review
@@ -427,6 +477,9 @@ def _background_review_read_before_write_guard(
 
 
 def _background_review_preflight(action: str, name: str) -> Optional[Dict[str, Any]]:
+    disabled = _background_review_disabled_guard(action, name)
+    if disabled:
+        return disabled
     if action not in {"edit", "patch", "delete", "write_file", "remove_file"}:
         return None
     existing = _find_skill(name)

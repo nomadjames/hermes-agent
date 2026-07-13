@@ -581,6 +581,35 @@ class TestSkillManageDispatcher:
         assert result["success"] is True
         assert usage["review-sediment"]["created_by"] == "agent"
 
+    def test_background_review_refuses_create_when_live_nudge_is_disabled(self, tmp_path):
+        """Disabling post-turn review fences new skills as well as edits."""
+        from tools.skill_provenance import (
+            BACKGROUND_REVIEW,
+            reset_current_write_origin,
+            set_current_write_origin,
+        )
+
+        token = set_current_write_origin(BACKGROUND_REVIEW)
+        try:
+            with _skill_dir(tmp_path), patch(
+                "hermes_cli.config.load_config",
+                return_value={"skills": {"creation_nudge_interval": 0}},
+            ):
+                raw = skill_manage(
+                    action="create",
+                    name="blocked-skill",
+                    content=VALID_SKILL_CONTENT.replace(
+                        "name: test-skill", "name: blocked-skill"
+                    ),
+                )
+        finally:
+            reset_current_write_origin(token)
+
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "background skill review is disabled" in result["error"].lower()
+        assert not (tmp_path / "blocked-skill").exists()
+
     def test_delete_via_dispatcher_threads_absorbed_into(self, tmp_path):
         # Dispatcher must plumb absorbed_into through to _delete_skill so the
         # validation + message suffix paths are exercised end-to-end.
@@ -943,6 +972,61 @@ class TestExternalSkillMutations:
         result = json.loads(raw)
         assert result["success"] is False
         assert "pinned" in result["error"].lower()
+
+    def test_background_review_refuses_patch_when_live_nudge_is_disabled(self, tmp_path):
+        """A stale parent session cannot write after the live profile disables
+        post-turn skill review. The write guard must re-read current config."""
+        from tools.skill_provenance import (
+            BACKGROUND_REVIEW,
+            reset_current_write_origin,
+            set_current_write_origin,
+        )
+        from tools.skill_manager_tool import mark_background_review_skill_read
+
+        with _skill_dir(tmp_path):
+            _create_skill("my-skill", VALID_SKILL_CONTENT)
+            token = set_current_write_origin(BACKGROUND_REVIEW)
+            try:
+                mark_background_review_skill_read(tmp_path / "my-skill" / "SKILL.md")
+                with patch(
+                    "hermes_cli.config.load_config",
+                    return_value={"skills": {"creation_nudge_interval": 0}},
+                ), patch(
+                    "tools.skill_usage.get_record",
+                    return_value={"pinned": False},
+                ):
+                    raw = skill_manage(
+                        action="patch",
+                        name="my-skill",
+                        old_string="Do the thing.",
+                        new_string="Do the new thing.",
+                    )
+            finally:
+                reset_current_write_origin(token)
+
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "background skill review is disabled" in result["error"].lower()
+        assert "Do the thing." in (tmp_path / "my-skill" / "SKILL.md").read_text()
+
+    def test_foreground_patch_remains_allowed_when_live_nudge_is_disabled(self, tmp_path):
+        """The disable flag fences only autonomous background review."""
+        with _skill_dir(tmp_path):
+            _create_skill("my-skill", VALID_SKILL_CONTENT)
+            with patch(
+                "hermes_cli.config.load_config",
+                return_value={"skills": {"creation_nudge_interval": 0}},
+            ):
+                raw = skill_manage(
+                    action="patch",
+                    name="my-skill",
+                    old_string="Do the thing.",
+                    new_string="Do the new thing.",
+                )
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert "Do the new thing." in (tmp_path / "my-skill" / "SKILL.md").read_text()
 
     def test_background_review_unpinned_skill_not_blocked_by_pin_guard(self, tmp_path):
         """The pin guard must not over-block: an unpinned agent-owned skill is
