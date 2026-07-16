@@ -67,8 +67,9 @@ class _NoTrigramConnection(sqlite3.Connection):
 
 
 @pytest.fixture()
-def db(tmp_path):
+def db(tmp_path, monkeypatch):
     """Create a SessionDB with a temp database file."""
+    monkeypatch.delenv("HERMES_DISABLE_FTS_TRIGRAM", raising=False)
     db_path = tmp_path / "test_state.db"
     session_db = SessionDB(db_path=db_path)
     yield session_db
@@ -788,6 +789,41 @@ class TestSessionLifecycle:
             assert len(db.search_messages("hello")) == 1
         finally:
             db.close()
+
+    def test_profile_env_flag_disables_trigram_without_disabling_base_fts(
+        self, tmp_path, monkeypatch
+    ):
+        """Profile opt-out works even when a cross-profile process opens the DB."""
+        monkeypatch.delenv("HERMES_DISABLE_FTS_TRIGRAM", raising=False)
+        db_path = tmp_path / "state.db"
+        seeded = SessionDB(db_path=db_path)
+        try:
+            seeded.create_session(session_id="s1", source="cli")
+            seeded.append_message("s1", role="user", content="legacy searchable message")
+            assert seeded._fts_table_exists("messages_fts_trigram") is True
+        finally:
+            seeded.close()
+
+        (tmp_path / ".env").write_text("HERMES_DISABLE_FTS_TRIGRAM=1\n")
+        restored = SessionDB(db_path=db_path)
+        try:
+            assert restored._fts_enabled is True
+            assert restored._trigram_available is False
+            assert restored._fts_table_exists("messages_fts") is True
+            assert restored._conn is not None
+
+            trigram_triggers = restored._conn.execute(
+                "SELECT count(*) FROM sqlite_master "
+                "WHERE type='trigger' AND name LIKE 'messages_fts_trigram_%'"
+            ).fetchone()[0]
+            assert trigram_triggers == 0
+
+            restored.append_message(
+                "s1", role="assistant", content="new keyword remains searchable"
+            )
+            assert len(restored.search_messages("keyword")) == 1
+        finally:
+            restored.close()
 
     def test_v11_migration_backfills_base_fts_when_trigram_unavailable(
         self, tmp_path, monkeypatch
