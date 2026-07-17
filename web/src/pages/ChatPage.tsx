@@ -41,9 +41,11 @@ import {
   PTY_CONNECTING_TIMEOUT_MS,
   PTY_RECONNECT_INPUT_MESSAGE,
   PTY_RESUME_RECONNECT_THROTTLE_MS,
+  ptyAttachTokenStorageKey,
   type PtyConnectionState,
   shouldBlockPtyInput,
   shouldReconnectPtyOnPageResume,
+  shouldResetPtyBeforeReplay,
 } from "@/lib/pty-reconnect";
 import {
   MOBILE_REPLACEMENT_WINDOW_MS,
@@ -64,12 +66,12 @@ import { useProfileScope } from "@/contexts/useProfileScope";
 // instead of spawning a fresh one. Per-localStorage, so other devices can't grab it.
 // ``rotate`` mints a new token — used when the user explicitly starts a fresh
 // session so the old keep-alive PTY is NOT reattached (the registry reaps it).
-const PTY_ATTACH_TOKEN_KEY = "hermes.pty.token.chat";
-function ptyAttachToken(rotate = false): string {
+function ptyAttachToken(scope: string, rotate = false): string {
+  const storageKey = ptyAttachTokenStorageKey(scope);
   let t = "";
   if (!rotate) {
     try {
-      t = window.localStorage.getItem(PTY_ATTACH_TOKEN_KEY) ?? "";
+      t = window.localStorage.getItem(storageKey) ?? "";
     } catch {
       /* private mode / storage blocked */
     }
@@ -79,7 +81,7 @@ function ptyAttachToken(rotate = false): string {
     crypto.getRandomValues(a);
     t = Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
     try {
-      window.localStorage.setItem(PTY_ATTACH_TOKEN_KEY, t);
+      window.localStorage.setItem(storageKey, t);
     } catch {
       /* ignore */
     }
@@ -320,6 +322,12 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     (title: string | null) => setSessionTitleState({ scope: titleScope, title }),
     [titleScope],
   );
+  const handleMessageComplete = useCallback(() => {
+    // Tool-heavy turns can leave xterm's viewport in scrollback even though
+    // the final assistant response was rendered successfully. Return to the
+    // completed answer when the structured sidecar reports message.complete.
+    requestAnimationFrame(() => termRef.current?.scrollToBottom());
+  }, []);
 
   useEffect(() => {
     if (!isActive) {
@@ -888,6 +896,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     // ``return cleanup`` stays at the top level; handlers + disposables
     // are hoisted to ``let`` bindings the cleanup closes over.
     let unmounting = false;
+    let replayPending = false;
     let onDataDisposable: { dispose(): void } | null = null;
     let onResizeDisposable: { dispose(): void } | null = null;
     const forceFresh = forceFreshPtyRef.current;
@@ -925,7 +934,10 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       // Keep-alive identity: reattach to this tab's living PTY across
       // refresh/transient drops. A forced-fresh start rotates the token so
       // the previous keep-alive PTY is not reattached (registry reaps it).
-      params.attach = ptyAttachToken(forceFresh);
+      params.attach = ptyAttachToken(
+        `${scopedProfile || "default"}\0${resumeParam || "active"}`,
+        forceFresh,
+      );
       // Profile-scoped chat: the PTY child gets HERMES_HOME pointed at the
       // selected profile, so the conversation runs with that profile's model,
       // skills, memory, and sessions (see web_server._resolve_chat_argv).
@@ -951,6 +963,17 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       }, PTY_CONNECTING_TIMEOUT_MS);
 
     ws.onopen = () => {
+      const recovering = shouldResetPtyBeforeReplay(
+        ptyStateRef.current,
+        reconnectAttemptRef.current,
+      );
+      if (recovering) {
+        // The keep-alive server replays its PTY ring buffer on reattach. Replay
+        // into a clean terminal instead of layering it over stale cursor and
+        // scrollback state from the disconnected browser socket.
+        term.reset();
+        replayPending = true;
+      }
       clearReconnectTimer();
       clearConnectingTimer();
       connectInFlightRef.current = false;
@@ -991,11 +1014,16 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     };
 
     ws.onmessage = (ev) => {
-      if (typeof ev.data === "string") {
-        term.write(ev.data);
-      } else {
-        term.write(new Uint8Array(ev.data as ArrayBuffer));
-      }
+      const data =
+        typeof ev.data === "string"
+          ? ev.data
+          : new Uint8Array(ev.data as ArrayBuffer);
+      term.write(data, () => {
+        if (replayPending) {
+          replayPending = false;
+          term.scrollToBottom();
+        }
+      });
     };
 
     ws.onclose = (ev) => {
@@ -1390,6 +1418,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
                 channel={channel}
                 profile={scopedProfile}
                 onDashboardNewSessionRequest={startFreshDashboardChat}
+                onMessageComplete={handleMessageComplete}
                 onSessionTitleChange={handleSessionTitleChange}
               />
             </div>
@@ -1510,6 +1539,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
                 channel={channel}
                 profile={scopedProfile}
                 onDashboardNewSessionRequest={startFreshDashboardChat}
+                onMessageComplete={handleMessageComplete}
                 onSessionTitleChange={handleSessionTitleChange}
               />
             </div>

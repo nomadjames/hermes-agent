@@ -32,7 +32,7 @@ import { ModelReloadConfirm } from "@/components/ModelReloadConfirm";
 import { ReasoningPicker } from "@/components/ReasoningPicker";
 import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
 import { api, buildWsUrl } from "@/lib/api";
-import { titleFromSessionInfoPayload } from "@/lib/chat-title";
+import { dispatchChatEvent } from "@/lib/chat-event-dispatch";
 
 import { cn } from "@/lib/utils";
 import { AlertCircle, ChevronDown, RefreshCw } from "lucide-react";
@@ -76,6 +76,7 @@ interface ChatSidebarProps {
   profile?: string;
   className?: string;
   onDashboardNewSessionRequest?: () => void;
+  onMessageComplete?: () => void;
   onSessionTitleChange?: (title: string | null) => void;
 }
 
@@ -99,6 +100,7 @@ export function ChatSidebar({
   profile,
   className,
   onDashboardNewSessionRequest,
+  onMessageComplete,
   onSessionTitleChange,
 }: ChatSidebarProps) {
   // `version` bumps on reconnect; gw is derived so we never call setState
@@ -280,14 +282,11 @@ export function ChatSidebar({
 
         const { type, payload } = frame.params;
 
-        if (type === "session.info") {
-          const title = titleFromSessionInfoPayload(payload);
-          if (title !== undefined) {
-            onSessionTitleChange?.(title);
-          }
-        } else if (type === "dashboard.new_session_requested") {
-          onDashboardNewSessionRequest?.();
-        }
+        dispatchChatEvent(type, payload, {
+          onDashboardNewSessionRequest,
+          onMessageComplete,
+          onSessionTitleChange,
+        });
       });
     })();
 
@@ -295,7 +294,13 @@ export function ChatSidebar({
       unmounting = true;
       ws?.close();
     };
-  }, [channel, onDashboardNewSessionRequest, onSessionTitleChange, version]);
+  }, [
+    channel,
+    onDashboardNewSessionRequest,
+    onMessageComplete,
+    onSessionTitleChange,
+    version,
+  ]);
 
   // Seed the badge on mount and re-read it whenever the sockets are rebuilt
   // (a profile/channel switch bumps `version`).

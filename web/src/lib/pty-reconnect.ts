@@ -18,6 +18,12 @@ export const PTY_RESUME_RECONNECT_THROTTLE_MS = 1000;
 // and force-closed so `onclose` → scheduleReconnect can recover it.
 export const PTY_CONNECTING_TIMEOUT_MS = 8000;
 
+const PTY_ATTACH_TOKEN_KEY = "hermes.pty.token.chat";
+
+export function ptyAttachTokenStorageKey(scope: string): string {
+  return `${PTY_ATTACH_TOKEN_KEY}.${encodeURIComponent(scope || "default")}`;
+}
+
 export interface PtyResumeReconnectInput {
   isActive: boolean;
   visibilityState?: DocumentVisibilityState;
@@ -73,4 +79,13 @@ export function shouldReconnectPtyOnPageResume({
 
 export function shouldBlockPtyInput(ptyState: PtyConnectionState): boolean {
   return ptyState !== "open";
+}
+
+export function shouldResetPtyBeforeReplay(
+  ptyState: PtyConnectionState,
+  reconnectAttempt: number,
+): boolean {
+  return (
+    reconnectAttempt > 0 || ptyState === "reconnecting" || ptyState === "closed"
+  );
 }
